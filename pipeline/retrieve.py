@@ -1,5 +1,5 @@
 """
-Hybrid retrieval: BM25 pre-filter → vector cosine → RRF → cross-encoder rerank.
+Hybrid retrieval: BM25 pre-filter → vector cosine → RRF → source credibility → cross-encoder rerank.
 
 KEY optimisation (vs naive approach):
   Naïve:     embed ALL chunks → cosine → rerank  [O(n) embeddings, slow on CPU]
@@ -7,12 +7,13 @@ KEY optimisation (vs naive approach):
              For n=85 chunks: embeds ~25 texts instead of 85. ~3-4x faster.
 
 Pipeline:
-  1. BM25 (tokenised keyword, O(n), instant) → top EMBED_POOL candidates
-  2. Embed query + those candidates only (21-25 texts instead of 85+)
-  3. Cosine similarity (O(EMBED_POOL), vectorised numpy)
-  4. RRF: merge BM25 and cosine rank lists → top CE_POOL
-  5. Cross-encoder (TinyBERT): score CE_POOL pairs → final top_k
-  6. Fire-and-forget: upsert candidates to web_chunks (pgvector cache)
+   1. BM25 (tokenised keyword, O(n), instant) → top EMBED_POOL candidates
+   2. Embed query + those candidates only (21-25 texts instead of 85+)
+   3. Cosine similarity (O(EMBED_POOL), vectorised numpy)
+   4. RRF: merge BM25 and cosine rank lists → top CE_POOL
+   5. Source credibility boost: domain-tier + recency bonus applied to RRF scores
+   6. Cross-encoder (TinyBERT): score CE_POOL pairs → final top_k
+   7. Fire-and-forget: upsert candidates to web_chunks (pgvector cache)
 """
 import asyncio
 import contextvars
@@ -20,7 +21,7 @@ import logging
 import math
 import re
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 from langsmith import traceable
@@ -41,6 +42,121 @@ RRF_K       = 60   # standard constant — larger = smoother fusion
 EMBED_POOL  = 24   # BM25 candidates to embed (recall vs. latency tradeoff)
 CE_POOL     = 16   # cross-encoder input pool
 TOP_K       = 8    # final chunks returned to LLM (also surfaced in UI)
+
+# ── Source credibility tiers (Phase 3.12) ───────────────────────────────────
+# Higher-tier domains receive a small RRF score boost so they rank above
+# lower-tier sources of similar relevance. Boost values are additive to the
+# raw RRF score (not multiplicative) so the cross-encoder still determines
+# precision ranking within a tier.
+#
+# Tier definitions — general-audience domains are intentionally loose.
+# Tier 4 (forums/uGC) gets a penalty rather than a boost.
+
+_TIER_PATTERNS: list[tuple[int, re.Pattern, str]] = [
+    (0, re.compile(r"\.edu\.(?:au|uk|ca|jp)?$|\.gov$|\.mil$"), "academic/gov"),
+    (1, re.compile(
+        r"reuters\.com|"
+        r"apnews\.com|"
+        r"bloomberg\.com|"
+        r"wsj\.com|"
+        r"nytimes\.com|"
+        r"washingtonpost\.com|"
+        r"theguardian\.com|"
+        r"economist\.com|"
+        r"nature\.com|"
+        r"science\.org|"
+        r"arxiv\.org|"
+        r"scholar\.google\.com"
+    ), "established"),
+    (3, re.compile(
+        r"reddit\.com|"
+        r"(?:stackexchange|stackoverflow)\.com|"
+        r"quora\.com|"
+        r"medium\.com|"
+        r"wikipedia\.org"
+    ), "forum/ugc"),
+]
+_TIER_BOOST = {0: 0.008, 1: 0.004, 2: 0.0, 3: -0.003}
+_TIER_LABEL = {0: "academic/gov", 1: "established", 2: "general", 3: "forum/ugc"}
+_RECENCY_YEAR_MIN = 2022  # content older than this gets no recency bonus
+_TEMPORAL_QUERY_RE = re.compile(
+    r"\b("
+    r"latest|current|recent|recently|today|yesterday|this year|"
+    r"now|new|newest|update|status|as of|202[2-9]"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _domain_tier(url: str) -> int:
+    """Classify a URL into a credibility tier (0 = highest, 3 = lowest).
+
+    Always operates on the parsed hostname so patterns like `.gov$` match
+    `nih.gov` even when the full URL is `https://www.nih.gov/news/...`.
+    """
+    from urllib.parse import urlparse
+    try:
+        host = (urlparse(url).hostname or url).lower().removeprefix("www.")
+    except Exception:
+        host = url.lower().removeprefix("www.")
+    if host.endswith(".gov") or host.endswith(".mil") or host.endswith(".edu") or ".edu." in host:
+        return 0
+    for tier, pattern, _label in _TIER_PATTERNS:
+        if pattern.search(host):
+            return tier
+    return 2
+
+
+def _extract_year(url: str) -> Optional[int]:
+    """Try to extract a 4-digit year from a URL path.
+    E.g. 'https://example.com/2025/03/news' -> 2025
+    """
+    from urllib.parse import urlparse
+    try:
+        path = urlparse(url).path
+        m = re.search(r"\b(20[2-9]\d)\b", path)
+        if m:
+            return int(m.group(1))
+    except Exception:
+        pass
+    return None
+
+
+def _apply_credibility_boost(
+    rrf_ranked: list[tuple[int, float]],
+    candidates: list["Chunk"],
+    *,
+    apply_recency: bool = False,
+) -> tuple[list[tuple[int, float]], dict[str, int]]:
+    """Apply source credibility boost to RRF scores and return tier distribution.
+
+    Returns (boosted_ranked, tier_distribution).
+
+    The boost is additive — small enough that cross-encoder reranking still
+    dominates precision, but enough to lift `.edu` / `.gov` sources above
+    equal-relevance general domains.
+    """
+    tier_dist: dict[str, int] = {}
+    boosted: list[tuple[int, float]] = []
+    for local_idx, score in rrf_ranked:
+        if local_idx < len(candidates):
+            url = candidates[local_idx].url
+            tier = _domain_tier(url)
+            label = _TIER_LABEL.get(tier, "general")
+            tier_dist[label] = tier_dist.get(label, 0) + 1
+            boost_score = score + _TIER_BOOST.get(tier, 0.0)
+            if apply_recency:
+                # Recency bonus: +0.002 per year after _RECENCY_YEAR_MIN (capped at +0.01)
+                year = _extract_year(url)
+                if year and year >= _RECENCY_YEAR_MIN:
+                    recency_boost = min(0.01, (year - _RECENCY_YEAR_MIN) * 0.002)
+                    boost_score += recency_boost
+            boosted.append((local_idx, boost_score))
+        else:
+            boosted.append((local_idx, score))
+    # Re-sort after boost
+    boosted.sort(key=lambda x: x[1], reverse=True)
+    return boosted, tier_dist
 
 # Defensive dedup — see _dedupe_ranked() docstring.
 # Use a generous fingerprint window so chunks that share a heading/intro paragraph
@@ -258,13 +374,22 @@ async def retrieve(
     # ── Stage 4: RRF ────────────────────────────────────────────────────────────
     rrf_ranks = _traced_rrf(vec_ranks_list, bm25_local_ranks, n=len(candidates))
 
-    # ── Stage 5: Cross-encoder rerank (sync, thread pool) ───────────────────────
+    # ── Stage 5: Source credibility boost (tier boost + recency) ────────────────
+    # Applied to RRF scores before cross-encoder so higher-tier sources get
+    # a small advantage when relevance is otherwise equal.
+    boosted_rrf, tier_dist = _apply_credibility_boost(
+        rrf_ranks,
+        candidates,
+        apply_recency=bool(_TEMPORAL_QUERY_RE.search(query)),
+    )
+
+    # ── Stage 6: Cross-encoder rerank (sync, thread pool) ───────────────────────
     # Run CE on the full pool, then apply dedup + per-URL cap, THEN trim to top_k.
     # This lets the diversity cap actually drop saturated-URL chunks before the
     # final cut, instead of after.
     ce_pool   = min(CE_POOL, len(candidates))
-    ce_chunks = [candidates[i] for i, _ in rrf_ranks[:ce_pool]]
-    ce_scores = [s            for _, s in rrf_ranks[:ce_pool]]
+    ce_chunks = [candidates[i] for i, _ in boosted_rrf[:ce_pool]]
+    ce_scores = [s            for _, s in boosted_rrf[:ce_pool]]
 
     reranked = await _run_in_ctx(
         _traced_rerank, query, ce_chunks, ce_scores, ce_pool,
@@ -288,15 +413,23 @@ async def retrieve(
     ]
 
     scores = [r.score for r in result] or [0.0]
+    # Tier distribution from input candidate pool, not just final top-k
+    total_tiered = sum(tier_dist.values())
+    source_tier_pct = {
+        label: round(100.0 * count / total_tiered, 1)
+        for label, count in sorted(tier_dist.items())
+    } if total_tiered else {}
     explain = {
-        "total_chunks":    len(chunks),
-        "bm25_pool":       len(candidates),
-        "ce_pool":         ce_pool,
-        "dedup_dropped":   dedup_dropped,
-        "url_cap_dropped": url_cap_dropped,
-        "final_kept":      len(result),
-        "score_min":       round(min(scores), 4),
-        "score_max":       round(max(scores), 4),
+        "total_chunks":         len(chunks),
+        "bm25_pool":            len(candidates),
+        "ce_pool":              ce_pool,
+        "dedup_dropped":        dedup_dropped,
+        "url_cap_dropped":      url_cap_dropped,
+        "final_kept":           len(result),
+        "score_min":            round(min(scores), 4),
+        "score_max":            round(max(scores), 4),
+        "tier_distribution":    tier_dist,
+        "tier_percentages":     source_tier_pct,
     }
 
     logger.info(

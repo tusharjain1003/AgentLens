@@ -1,5 +1,12 @@
 from pipeline.chunk import Chunk
-from pipeline.retrieve import RankedChunk, _cap_per_url, _dedupe_ranked, _rrf_merge
+from pipeline.retrieve import (
+    RankedChunk,
+    _apply_credibility_boost,
+    _cap_per_url,
+    _dedupe_ranked,
+    _domain_tier,
+    _rrf_merge,
+)
 
 
 def _chunk(url: str, index: int, text: str = "body") -> Chunk:
@@ -47,3 +54,23 @@ def test_cap_per_url_limits_source_dominance():
         "https://b.test",
     ]
     assert dropped == 2
+
+
+def test_domain_tier_classifies_common_edu_and_gov_hosts():
+    assert _domain_tier("https://harvard.edu/news/research") == 0
+    assert _domain_tier("https://www.nih.gov/news-events") == 0
+    assert _domain_tier("https://example.edu.au/report") == 0
+
+
+def test_recency_boost_only_applies_when_requested():
+    chunks = [
+        _chunk("https://general.test/2026/report", 0),
+        _chunk("https://general.test/2021/report", 1),
+    ]
+    ranked = [(0, 0.02), (1, 0.02)]
+
+    without_recency, _ = _apply_credibility_boost(ranked, chunks, apply_recency=False)
+    with_recency, _ = _apply_credibility_boost(ranked, chunks, apply_recency=True)
+
+    assert without_recency == ranked
+    assert with_recency[0][1] > with_recency[1][1]
