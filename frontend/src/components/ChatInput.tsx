@@ -51,7 +51,7 @@ export default function ChatInput() {
             }
           }}
           rows={1}
-          placeholder="Ask WebLens"
+          placeholder="Ask AgentLens"
           className="flex-1 bg-transparent outline-none resize-none py-1.5 text-[15px] text-neutral-100 placeholder:text-neutral-500 max-h-48 scroll-thin"
         />
         {isStreaming ? (
@@ -86,7 +86,7 @@ export default function ChatInput() {
         )}
       </div>
       <div className="text-2xs text-neutral-500 text-center mt-2 whitespace-nowrap overflow-hidden text-ellipsis">
-        WebLens can make mistakes. Verify important info. <span className="text-neutral-600">· Built by Swapnil Padhi · MIT License · © 2026</span>
+        AgentLens can make mistakes. Verify important info. <span className="text-neutral-600">· Built by Tushar Jain · MIT License · © 2026</span>
       </div>
     </div>
   );

@@ -1,4 +1,4 @@
-# Directory Structure — WebLens
+# Directory Structure — AgentLens
 
 > Current as of v12 (2026-05-11). For architectural context see [ARCHITECTURE.md](./ARCHITECTURE.md). For version-by-version change history see the `implementation-summary-v*.md` series.
 

@@ -1,4 +1,4 @@
-# WebLens — Launch & shutdown
+# AgentLens — Launch & shutdown
 
 ## One-time setup
 
@@ -104,7 +104,7 @@ python evals/run_eval.py --v6-smoke
 ```
 
 Note: the eval script defaults to `http://localhost:8000`. Either point it
-at WebLens explicitly:
+at AgentLens explicitly:
 
 ```powershell
 python evals/run_eval.py --v6-smoke --url http://localhost:8765

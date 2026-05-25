@@ -1,4 +1,4 @@
-# WebLens — System Architecture
+# AgentLens — System Architecture
 
 > Current as of v9 (2026-05-11). This document describes the full production architecture. For the version-by-version change history see the `docs/implementation-summary-v*.md` series. For evaluation methodology see [EVALUATION.md](./EVALUATION.md). For the on-disk layout see [DIRECTORY-STRUCTURE.md](./DIRECTORY-STRUCTURE.md).
 
@@ -6,7 +6,7 @@
 
 ## 1. System Overview
 
-WebLens is a production-grade Web Search RAG system: it answers natural-language questions by orchestrating real-time web retrieval, full-page extraction, hybrid semantic search, cross-encoder reranking, and LLM synthesis — streamed to the user via SSE before the pipeline completes.
+AgentLens is a production-grade Web Search RAG system: it answers natural-language questions by orchestrating real-time web retrieval, full-page extraction, hybrid semantic search, cross-encoder reranking, and LLM synthesis — streamed to the user via SSE before the pipeline completes.
 
 The architecture is designed around three non-negotiable constraints:
 

@@ -1,4 +1,4 @@
-# Contributing to WebLens
+# Contributing to AgentLens
 
 ## Getting Started
 
@@ -72,14 +72,7 @@ See `docs/DIRECTORY-STRUCTURE.md` for a full file-by-file map.
 
 ### 1. Pick an Issue
 
-Check the roadmap in `implementation_plan.md` for planned work. Current phases:
-
-| Phase | Focus | Status |
-|-------|-------|--------|
-| 1 | Foundation (tests, CI/CD, Docker) | Complete |
-| 2 | Agentic (reflection, verification, tool routing) | Complete |
-| 3 | Hardening (prompt-injection, auth, credibility, feedback) | Complete |
-| 4 | Stretch (memory, docs) | In progress |
+See [ROADMAP.md](ROADMAP.md) for the project roadmap and completed phases.
 
 ### 2. Make Changes
 
@@ -134,7 +127,7 @@ Keep commits scoped to one logical change. Use the `Phase N.N:` prefix matching 
 2. Add the node to the `StateGraph` in `graph.py`
 3. Wire conditional routing edges
 4. Add a `@traceable` wrapper for LangSmith observability
-5. Add failure modes + fallbacks per the pattern in `implementation_plan.md#failure-modes--fallbacks`
+5. Add failure modes + fallbacks — every node must handle: LLM timeout → skip, parse error → default, API error → fallback tool. See existing nodes for patterns.
 6. Write a unit test in `tests/`
 7. Update `docs/DIRECTORY-STRUCTURE.md` if adding a new file
 

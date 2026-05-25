@@ -1,4 +1,4 @@
-# WebLens
+# AgentLens
 
 > A production-grade agentic web research RAG system — retrieves full-page content, runs hybrid semantic search, reflects on coverage gaps, verifies claims against sources, and streams grounded answers with citations in real time.
 
@@ -6,6 +6,7 @@
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-green)](https://fastapi.tiangolo.com)
 [![React](https://img.shields.io/badge/React-18-61dafb)](https://react.dev)
 [![LangGraph](https://img.shields.io/badge/LangGraph-StateGraph-orange)](https://langchain-ai.github.io/langgraph/)
+[![CI](https://github.com/tusharjain1003/AgentLens/actions/workflows/ci.yml/badge.svg)](https://github.com/tusharjain1003/AgentLens/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-MIT-lightgrey)](LICENSE)
 
 ---
@@ -30,7 +31,7 @@
 
 ![System Architecture](assets/architecture.png)
 
-WebLens answers natural-language questions by orchestrating real-time web retrieval, full-page extraction, hybrid semantic search, cross-encoder reranking, reflection-based gap recovery, claim verification, and LLM synthesis — all streamed to the frontend via Server-Sent Events before the pipeline completes.
+AgentLens answers natural-language questions by orchestrating real-time web retrieval, full-page extraction, hybrid semantic search, cross-encoder reranking, reflection-based gap recovery, claim verification, and LLM synthesis — all streamed to the frontend via Server-Sent Events before the pipeline completes.
 
 **Three non-negotiable design constraints drive the architecture:**
 
@@ -122,7 +123,7 @@ The pipeline is a [LangGraph StateGraph](https://langchain-ai.github.io/langgrap
 | **Reflection Loop** | Post-retrieval coverage check identifies answer gaps, re-decomposes into gap queries, retrieves from cached content, and merges augmented sub-answers |
 | **Claim Verification** | Post-hoc hallucination check: extracts claims from answer, verifies each against source chunks (flag or regenerate mode) |
 | **Parametric Routing** | Arithmetic, geography, and textbook-stable facts bypass search entirely (~2-5s vs 25-60s) |
-| **Unsupported Handling** | PDFs, diagrams, images, code execution → polite decline that redirects to what WebLens *can* do |
+| **Unsupported Handling** | PDFs, diagrams, images, code execution → polite decline that redirects to what AgentLens *can* do |
 
 ### Search & Retrieval
 
@@ -163,6 +164,30 @@ The pipeline is a [LangGraph StateGraph](https://langchain-ai.github.io/langgrap
 | **Session Management** | Session history with full trace replay |
 | **Evaluation Dashboard** | Dev-only eval results inspector |
 | **Dark Mode** | Tailwind CSS with dark theme |
+
+---
+
+## Observability
+
+LangSmith tracing is built into every LangGraph node — each emits a typed span:
+
+| Node | `run_type` | Key span attributes |
+|------|------------|-------------------|
+| `analyze` | `chain` | `mode`, `sub_queries`, `tools_selected`, `confidence`, `route_reason` |
+| `search_urls` | `retriever` | `query`, `results_count`, `source` |
+| `extract_pages` | `chain` | `pages`, `failures`, `injection_flags` |
+| `retrieve` | `retriever` | `bm25_hits`, `dense_hits`, `rerank_scores`, `tier_distribution` |
+| `generate` | `llm` | `chunks_available`, `citations_used`, `utilization_ratio` |
+| `reflect` | `chain` | `gaps_found`, `gap_queries`, `iteration`, `action` |
+| `verify` | `chain` | `total_claims`, `supported`, `unsupported`, `mode` |
+
+Tracing is off by default to keep costs predictable. Enable per-request:
+
+```bash
+curl -H "X-Langsmith-Trace: true" ...
+# or for full eval runs:
+python evals/run_eval.py --full --trace on
+```
 
 ---
 
@@ -305,7 +330,7 @@ GET    /api/health                    Environment info, version, LLM provider
 
 ## Evaluation Results
 
-WebLens ships with a production-grade automated evaluation harness: 52 questions across 11 adversarial categories, 5 core metrics judged by LLM-as-judge, with auto-classified failure analysis.
+AgentLens ships with a production-grade automated evaluation harness: 52 questions across 11 adversarial categories, 5 core metrics judged by LLM-as-judge, with auto-classified failure analysis.
 
 ### Latest Results (v12 — 52-question full run)
 
@@ -462,6 +487,11 @@ See [DEPLOYMENT.md](docs/DEPLOYMENT.md) for detailed Railway, Heroku, and AWS in
 │   ├── run_eval.py        CLI runner: 5 metrics, async concurrent
 │   ├── question_dataset/  Benchmark questions (single-turn + multiturn)
 │   └── results/           Timestamped run artifacts with failure analysis
+├── dev/                   Local dev convenience scripts
+│   ├── run_backend.bat    Start FastAPI on localhost:8765 (Windows)
+│   └── run_frontend.bat   Start Vite dev server on localhost:5174 (Windows)
+├── assets/                Architecture diagrams, screenshots, LangSmith traces
+├── .github/workflows/     CI, eval-smoke, and deploy workflows
 └── docs/                  Full documentation
     ├── ARCHITECTURE.md    System architecture
     ├── RAG-MODEL-PIPELINE.md  Deep-dive retrieval pipeline
@@ -472,6 +502,16 @@ See [DEPLOYMENT.md](docs/DEPLOYMENT.md) for detailed Railway, Heroku, and AWS in
 ---
 
 ## Design Decisions
+
+### Non-Obvious Tradeoffs
+
+**Why retrieval is global, not per-sub-query.** Extraction runs once over the deduplicated URL union across all sub-queries. This eliminates redundant fetches for overlapping URLs (common in comparison queries), ensures citation number consistency across sub-answers, and halves extraction latency at the cost of a slightly larger chunk pool per retrieval call.
+
+**Why the reflection loop is capped at 1 iteration.** Each reflection pass calls the LLM to detect gaps, re-decomposes if needed, retrieves from the *already-cached* chunk pool (never re-fetches from the web), and merges augmented sub-answers. A second pass would retrieve from the same cache — diminishing returns for 2-3s of additional latency. The cap bounds worst-case latency to ~65s instead of unbounded growth.
+
+**Why the claim verifier runs post-streaming.** The verifier reads the complete answer text and compares each claim against source chunks. Running it before streaming would block the user from seeing any answer for an additional 3-5s. Running it after `done` means the user sees the answer immediately; if the verifier finds unsupported claims, it flags them inline or regenerates (quality mode) before the next turn.
+
+### Technology Choices
 
 | Decision | Chosen | Alternative | Tradeoff |
 |----------|--------|-------------|----------|
@@ -490,7 +530,7 @@ See [DEPLOYMENT.md](docs/DEPLOYMENT.md) for detailed Railway, Heroku, and AWS in
 ## UI Screenshots
 
 ### Home Page
-![WebLens Home Page](assets/website-ss/home-page-fresh.png)
+![AgentLens Home Page](assets/website-ss/home-page-fresh.png)
 
 ### Reasoning Trace — Decomposed Sub-Queries
 ![Reasoning Trace — Decomposed](assets/website-ss/reasoning-trace-decomposed.png)
@@ -525,7 +565,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for setup instructions, development workf
 | Context precision | 0.654 — off-topic chunks pass the reranker | Cross-encoder threshold tuning |
 | Faithfulness | 0.649 — synthesis LLM adds uncited claims | Stricter "cite or omit" prompt |
 | Multi-hop comparison | Weakest category; under-decomposition | Reflection + re-decomposition |
-| LLM cost tracking | `TokenTracker` wired but not called from LLM clients | Deferred |
+| LLM cost tracking | `TokenTracker` wired with real DeepSeek usage data via `stream_options` | Active |
 
 ---
 

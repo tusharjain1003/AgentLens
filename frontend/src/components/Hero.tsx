@@ -64,7 +64,7 @@ export default function Hero() {
             Hi — what would you like to look up today?
           </p>
           <p className="mt-1.5 text-2xs sm:text-xs text-neutral-400 max-w-md mx-auto">
-            Grounded answers, with the receipts. Ask anything; WebLens decomposes,
+            Grounded answers, with the receipts. Ask anything; AgentLens decomposes,
             searches, retrieves, ranks, and cites — all visible in the trace.
           </p>
         </div>

@@ -1,10 +1,10 @@
-# WebLens RAG System — Evaluation Results & Benchmark Report
+# AgentLens RAG System — Evaluation Results & Benchmark Report
 
 **Classification**: Internal Engineering Document  
 **Version**: v7-bench-1 (three full runs)  
 **Evaluation window**: 2026-05-11  
 **Benchmark**: 30 questions × 10 categories, domain-balanced (≤20% per domain)  
-**Systems under test**: WebLens v7, v8, v9  
+**Systems under test**: AgentLens v7, v8, v9  
 **Historical baseline**: v1 (2026-05-07, RAG-trivia, 10q), v6 (2026-05-07, financial, 15q)
 
 ---
@@ -25,7 +25,7 @@
 
 ## 1. Executive Summary
 
-WebLens v9 is the strongest version of the system to date, posting an aggregate score of **0.789** against the v7-bench-1 benchmark — a **+9.9% absolute improvement** over the v7 baseline (0.718) achieved in three consecutive daily releases.
+AgentLens v9 is the strongest version of the system to date, posting an aggregate score of **0.789** against the v7-bench-1 benchmark — a **+9.9% absolute improvement** over the v7 baseline (0.718) achieved in three consecutive daily releases.
 
 The single biggest aggregate driver was the v9 benchmark calibration that reclassified four "either"-route questions (niche lore, stable textbook facts) from binary failures to route-agnostic scoring. That calibration is defensible: the system answers `niche1`, `niche2`, `pc1`, and `ctr2` correctly with or without search; the original eval penalized factual accuracy with a routing audit designed for temporal data. Stripping that accounting artifact, the underlying system improvement is closer to **+4–5% absolute** — still meaningful, concentrated in context precision, multi-hop reasoning, and ambiguity handling.
 
@@ -402,7 +402,7 @@ The worst outcome is the bottom-right quadrant: `tf3` failed fast because extrac
 
 ### 6.5 Scalability Implications
 
-The current bottlenecks (Jina extraction at 28.8%, generation at 26.8%) are both API-rate-limited. Horizontal scaling of the WebLens server itself does not help; the limit is upstream service throughput. At the current concurrency setting (4 parallel eval pipelines), the system is comfortably within single-instance capacity. For production traffic at scale, the bottleneck would shift to LLM API rate limits and Jina's concurrency ceiling.
+The current bottlenecks (Jina extraction at 28.8%, generation at 26.8%) are both API-rate-limited. Horizontal scaling of the AgentLens server itself does not help; the limit is upstream service throughput. At the current concurrency setting (4 parallel eval pipelines), the system is comfortably within single-instance capacity. For production traffic at scale, the bottleneck would shift to LLM API rate limits and Jina's concurrency ceiling.
 
 ---
 
@@ -577,7 +577,7 @@ The v9 filter: chunks with fewer than 8 words are discarded. Chunks where >40% o
 
 ```mermaid
 xychart-beta
-    title "WebLens Aggregate Score — v7-bench-1"
+    title "AgentLens Aggregate Score — v7-bench-1"
     x-axis ["v7 (T060411)", "v8 (T075017)", "v9 (T161015)"]
     y-axis "Aggregate Score" 0.60 --> 0.85
     line [0.718, 0.732, 0.789]
@@ -758,7 +758,7 @@ The v7-bench-1 benchmark (30 questions, 10 categories) is well-designed for stre
 
 ---
 
-*Report generated 2026-05-11 — WebLens Eval v7-bench-1*  
+*Report generated 2026-05-11 — AgentLens Eval v7-bench-1*  
 *Data sources: `evals/results/20260511T{060411,075017,161015}Z_full/`*  
 *Implementation sources: `docs/implementation-summary-v{7,8,9}.md`*  
 *Baseline: `docs/OVERALL-IMPROVEMENT-SUMMARY.md`, `evals/results/20260507T*/`*

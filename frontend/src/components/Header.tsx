@@ -64,7 +64,7 @@ export default function Header() {
           href="https://github.com/tusharjain1003/AgentLens"
           target="_blank"
           rel="noreferrer"
-          title="WebLens on GitHub"
+          title="AgentLens on GitHub"
         >
           <SolidGithub />
         </a>

@@ -9,8 +9,8 @@ Short list of what changed in this session.
 
 ## Branding & header
 - **Examples** moved back into the header next to Eval; New chat moved into the sidebar.
-- **Header GitHub icon** → links to WebLens repo (was AlphaLens).
-- **Logo click** triggers New chat + nav home; tab favicon is the WebLens glyph.
+- **Header GitHub icon** → links to AgentLens repo (was AlphaLens).
+- **Logo click** triggers New chat + nav home; tab favicon is the AgentLens glyph.
 
 ## Sidebar
 - **Drag-to-resize**: 4-px right-edge handle on desktop; width persists in `localStorage`. Bounds 200–540 px.
@@ -25,10 +25,10 @@ Short list of what changed in this session.
 
 ## Chat composer
 - **Stop button** uses theme `surface` (no red); icon-only; matches palette.
-- **Input placeholder** is now "Ask WebLens".
+- **Input placeholder** is now "Ask AgentLens".
 
 ## Conversation turn
-- **Avatars swapped**: User on the right, WebLens glyph on the left.
+- **Avatars swapped**: User on the right, AgentLens glyph on the left.
 - **User question box** is now solid accent-tinted, right-aligned, capped at ~60% width with a gap before the answer.
 - **Wider answer column**: `max-w-3xl` → `max-w-5xl`.
 - **Below-answer toolbar**: Copy / Like / Dislike (each a 32-px icon button) plus a small rounded "Citations N" pill. Reactions persist per-turn in the store.

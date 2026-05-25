@@ -1,4 +1,4 @@
-# RAG Pipeline — WebLens
+# RAG Pipeline — AgentLens
 
 > Current as of v12 (2026-05-11). This document is a deep-dive into the retrieval and generation lifecycle. For the system architecture and LangGraph orchestration see [ARCHITECTURE.md](./ARCHITECTURE.md). For evaluation results see [evaluation-results-summary.md](./evaluation-results-summary.md).
 
@@ -6,7 +6,7 @@
 
 ## Pipeline Overview
 
-WebLens runs a multi-stage pipeline for every search query. In v12, this pipeline is driven by a **LangGraph `StateGraph`** with 12 nodes and 3 conditional routing decisions that happen before the retrieval/generation stages:
+AgentLens runs a multi-stage pipeline for every search query. The pipeline is driven by a **LangGraph `StateGraph`** with 15 nodes and conditional routing decisions that happen before the retrieval/generation stages:
 
 ```
 User Query

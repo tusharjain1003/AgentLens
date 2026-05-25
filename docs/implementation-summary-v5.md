@@ -6,7 +6,7 @@ Reference: [v4 baseline](implementation-summary-v4.md).
 ## Sidebar — collapse / resize
 
 - **Collapsed rail moved below the header.** The chevron + `+` buttons used to mount at
-  `top: 16px` and visually overlap the WebLens logo. They now anchor at
+  `top: 16px` and visually overlap the AgentLens logo. They now anchor at
   `top: HEADER_HEIGHT + 8px` (56 px) so they always sit cleanly under the header.
   ([Sidebar.tsx](../frontend/src/components/Sidebar.tsx))
 - **Single protruding-toggle component.** The arrow protrudes from the right edge of

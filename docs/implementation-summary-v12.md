@@ -1,6 +1,6 @@
 # Implementation Summary — v12 (Production-Grade RAG Improvements)
 
-WebLens v12 lands seven targeted, low-regression improvements to conversational
+AgentLens v12 lands seven targeted, low-regression improvements to conversational
 quality, retrieval grounding, async efficiency, citation accuracy, hyperlink
 support, generation lifecycle, and multi-turn context handling. All changes are
 surgical and preserve the LangGraph topology, the public SSE event protocol,
@@ -37,10 +37,10 @@ LangSmith spans both show **why** the pipeline took the path it did.
 **Files**: `pipeline/analyze.py`, `pipeline/graph.py`, `pipeline/capabilities.py`
 
 A new third routing mode `unsupported` was added. When the LLM detects a
-request for an artifact WebLens cannot produce (PDFs, diagrams, downloadable
+request for an artifact AgentLens cannot produce (PDFs, diagrams, downloadable
 files, images, video/audio, code execution), it returns
 `mode="unsupported"` plus a polite one-sentence decline that offers what
-WebLens *can* do instead. The reply is replayed through the existing
+AgentLens *can* do instead. The reply is replayed through the existing
 `node_parametric_answer` path, so the SSE shape and frontend stay unchanged.
 
 `pipeline/capabilities.py` holds the canonical supported / unsupported

@@ -60,7 +60,7 @@ export default function InfoModal({ onClose }: Props) {
 
         <div className="text-[15px] text-neutral-200 leading-relaxed mb-5 space-y-3">
           <p>
-            <span className="font-semibold text-neutral-50">WebLens</span> is a grounded
+            <span className="font-semibold text-neutral-50">AgentLens</span> is a grounded
             RAG-based web research assistant designed to make AI answers verifiable
             instead of vibes-based.
           </p>
@@ -72,11 +72,11 @@ export default function InfoModal({ onClose }: Props) {
           </p>
           <p>
             I built this because I was frustrated by how confidently modern LLMs
-            hallucinate. The idea behind WebLens was simple: if an AI gives an answer,
+            hallucinate. The idea behind AgentLens was simple: if an AI gives an answer,
             it should also show the receipts.
           </p>
           <p>
-            So instead of hiding retrieval behind the scenes, WebLens exposes the full
+            So instead of hiding retrieval behind the scenes, AgentLens exposes the full
             research flow — sources, reasoning traces, retrieval steps, and citations
             — allowing users to validate claims, inspect evidence, and trust the
             output with far more confidence.

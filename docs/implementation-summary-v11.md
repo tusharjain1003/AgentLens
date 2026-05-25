@@ -37,7 +37,7 @@ Fix:
 [ChatInput.tsx](../frontend/src/components/ChatInput.tsx)
 
 Replaced the single `press Enter to send · Shift+Enter for newline` line with two centered lines:
-1. `WebLens can make mistakes. Verify important info.`
+1. `AgentLens can make mistakes. Verify important info.`
 2. `Built by Swapnil Padhi · MIT License · © 2026`
 
 ### 6. Session title flash
@@ -125,7 +125,7 @@ Fix: added a `justLoadedRef` boolean. The session-switch effect sets it to `true
 Also: the 60vh tail spacer was the source of the visible black space at the bottom. Made it conditional on `isStreaming` — present during streaming so the latest user bubble can reach the top of the viewport, absent on loaded / idle sessions so the conversation ends flush with the input bar.
 
 ### 3b. Footer — one line
-Collapsed the two-line footer into a single line: `WebLens can make mistakes. Verify important info. · Built by Swapnil Padhi · MIT License · © 2026` with `whitespace-nowrap` and `overflow-hidden text-ellipsis` so narrow viewports truncate gracefully instead of wrapping.
+Collapsed the two-line footer into a single line: `AgentLens can make mistakes. Verify important info. · Built by Swapnil Padhi · MIT License · © 2026` with `whitespace-nowrap` and `overflow-hidden text-ellipsis` so narrow viewports truncate gracefully instead of wrapping.
 
 ### 4b. Eval tab — full metrics
 The eval JSON already contained ~10 metrics per question (faithfulness, context_recall, context_precision, answer_correctness, answer_relevancy, routing_decomposition, aggregate, M1/M3/M7); the UI was only rendering M1/M3/M7. The user's "old metrics" perception was actually "incomplete metrics".

@@ -1,6 +1,6 @@
 # Deployment Guide
 
-WebLens can be deployed to Railway (recommended), Heroku, AWS, or any cloud platform supporting Python ASGI apps.
+AgentLens can be deployed to Railway (recommended), Heroku, AWS, or any cloud platform supporting Python ASGI apps.
 
 ## Quick Start: Railway
 

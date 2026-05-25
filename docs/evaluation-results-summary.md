@@ -1,4 +1,4 @@
-# Evaluation Results Summary — WebLens
+# Evaluation Results Summary — AgentLens
 
 > Current as of v9 (2026-05-11). Benchmark: 30-question single-turn suite (`evals/question_dataset/benchmark.json`, v7-bench-1) across 10 categories. Evaluation framework rewrote in v7; pre-v7 metrics are not directly comparable.
 

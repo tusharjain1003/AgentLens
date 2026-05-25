@@ -1,4 +1,4 @@
-# WebLens — Overall Improvement Summary (v1 → v6)
+# AgentLens — Overall Improvement Summary (v1 → v6)
 
 A consolidated change history across every shipped iteration. For the
 canonical per-version detail, see the linked `implementation-summary-vN.md`
@@ -94,7 +94,7 @@ chrome:
 - **Header reshuffle**: Examples moved to the header next to Eval; New
   chat button moved into the sidebar.
 - **Branding**: logo click triggers New chat + nav home; favicon updated
-  to the WebLens glyph.
+  to the AgentLens glyph.
 - **Sidebar**: drag-to-resize handle (200–540 px, persisted in
   `localStorage`); edge-tab collapse replaces the floating Sessions pill.
 - **About modal**: centered backdrop-blurred modal (replaces the popover);

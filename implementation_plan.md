@@ -1,4 +1,4 @@
-# WebLens — Agentic AI Improvement Plan (Final)
+# AgentLens — Agentic AI Improvement Plan (Final)
 
 > **Target role:** AI Engineer — Agentic AI focus  
 > **Repository:** [weblens-main](file:///Users/tusharjain/Downloads/weblens-main)  

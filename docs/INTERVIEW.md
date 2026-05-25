@@ -1,4 +1,4 @@
-# WebLens Interview Guide
+# AgentLens Interview Guide
 
 > Production-grade web-search RAG with LangGraph orchestration, full-page extraction, hybrid retrieval, streaming answers, semantic caching, LangSmith tracing, and an eval harness.
 
@@ -6,7 +6,7 @@
 
 ## 30-Second Pitch
 
-WebLens answers natural-language questions from the live web. The core design choice is to retrieve full-page markdown instead of relying on search snippets, then chunk by heading boundaries, run hybrid BM25 + dense retrieval fused with RRF, rerank with a cross-encoder, and stream grounded answers with stable `[N]` citations.
+AgentLens answers natural-language questions from the live web. The core design choice is to retrieve full-page markdown instead of relying on search snippets, then chunk by heading boundaries, run hybrid BM25 + dense retrieval fused with RRF, rerank with a cross-encoder, and stream grounded answers with stable `[N]` citations.
 
 The current backend is a 12-node LangGraph graph with conditional routing for parametric answers, semantic cache hits, and full web retrieval. Each node emits typed SSE events for the React UI and LangSmith spans for debugging. The v9 baseline eval scored 0.789 aggregate across 30 adversarial questions with zero hard failures.
 
@@ -72,13 +72,13 @@ The important v12 change is `retrieve_and_generate`: retrieval and generation ar
 
 ## Why Full-Page Extraction Matters
 
-Snippet RAG has a hard information bottleneck: search snippets are short, often optimized for clicks, and usually omit caveats or nearby context. WebLens instead extracts full markdown, preserves headings, and cites ranked passages from the page body. This gives the retriever enough context to find precise evidence and gives the generator enough source material to avoid unsupported claims.
+Snippet RAG has a hard information bottleneck: search snippets are short, often optimized for clicks, and usually omit caveats or nearby context. AgentLens instead extracts full markdown, preserves headings, and cites ranked passages from the page body. This gives the retriever enough context to find precise evidence and gives the generator enough source material to avoid unsupported claims.
 
 ---
 
 ## Retrieval Design
 
-WebLens uses a precision-oriented stack:
+AgentLens uses a precision-oriented stack:
 
 | Layer | Role |
 |---|---|
@@ -101,7 +101,7 @@ The generation layer also strips markdown links that are not in the retrieved ci
 
 ## Caching Strategy
 
-WebLens has two separate caches:
+AgentLens has two separate caches:
 
 | Cache | Purpose | Key |
 |---|---|---|

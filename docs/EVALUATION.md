@@ -1,4 +1,4 @@
-# WebLens Evaluation
+# AgentLens Evaluation
 
 The evaluation framework lives in `evals/run_eval.py` and the benchmark data lives in `evals/question_dataset/`. It was rewritten in v7 to be lean (5 core metrics), async-concurrent, and produce a usable failure-mode report — not an academic benchmark.
 
