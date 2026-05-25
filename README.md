@@ -107,7 +107,7 @@ See the full detailed architecture with all layers and interactions in [ARCHITEC
 - **Global citation map** — `[N]` numbers assigned once, preserved through synthesis
 - **Session persistence** — JSONB traces enable byte-identical reasoning trace replay on session reload
 - **LangSmith observability** — per-node spans with typed `run_type` (`llm` / `retriever` / `tool`)
-- **Evaluation harness** — 30-question benchmark, 5 core metrics, LLM-as-judge, auto `failures.md`
+- **Evaluation harness** — 52-question benchmark, 5 core metrics, LLM-as-judge, auto `failures.md`
 
 ---
 
@@ -466,7 +466,7 @@ web-search-rag/
 ├── evals/                    Evaluation harness
 │   ├── run_eval.py           CLI runner: 5 metrics, async concurrent, --smoke/--full
 │   ├── question_dataset/
-│   │   ├── benchmark.json    30-question canonical benchmark (10 categories)
+│   │   ├── benchmark.json    52-question canonical benchmark (15 categories)
 │   │   └── multiturn.json    5 multi-turn scenarios
 │   └── results/              Timestamped run artifacts
 │
@@ -576,7 +576,7 @@ railway logs --follow
 # Smoke test (2 questions)
 python evals/run_eval.py --set smoke
 
-# Full benchmark (30 questions)
+# Full benchmark (52 questions)
 python evals/run_eval.py --set full
 
 # Multi-turn scenarios

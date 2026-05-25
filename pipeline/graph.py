@@ -61,7 +61,9 @@ from pipeline.followups import generate_followups
 from pipeline.generate import build_citations, generate_stream, strip_unknown_links, synthesize_stream
 from pipeline.retrieve import retrieve
 from pipeline.runtime import RuntimeContext, get_runtime, reset_runtime, set_runtime
-from pipeline.search import discover_urls
+from pipeline.search import SearchResult, discover_urls
+from pipeline.tools.academic import search_arxiv
+from pipeline.tools.calculator import CalculatorError, evaluate_expression
 from pipeline import query_cache
 
 
@@ -104,6 +106,15 @@ async def _traced_discover_urls(sub_query: str, max_results: int):
     return await discover_urls(sub_query, max_results=max_results)
 
 
+@traceable(run_type="tool", name="Academic search · arXiv")
+async def _traced_academic_search(sub_query: str, max_results: int):
+    results = await search_arxiv(sub_query, max_results=max_results)
+    return [
+        SearchResult(url=r.url, title=r.title, snippet=r.summary)
+        for r in results
+    ]
+
+
 @traceable(run_type="tool", name="Page extraction · Jina + trafilatura")
 async def _traced_extract_pages(search_results):
     return await _extract_pages(search_results)
@@ -130,6 +141,11 @@ def _traced_embedding_cleanup(candidate_count: int) -> dict:
 @traceable(run_type="tool", name="Cache insert")
 async def _traced_cache_insert(**kwargs):
     return await query_cache.insert(**kwargs)
+
+
+@traceable(run_type="tool", name="Calculator")
+def _traced_calculator(expression: str):
+    return evaluate_expression(expression)
 
 
 logger = logging.getLogger(__name__)
@@ -160,6 +176,9 @@ class GraphState(TypedDict, total=False):
     rationale: str
     route_reason: str
     confidence: Optional[float]
+    tools: list
+    tool_rationale: str
+    tool_input: Optional[str]
     rewrote: bool
     # Phase 7 — rewriter classification (out)
     is_topic_switch: bool
@@ -267,6 +286,8 @@ async def node_analyze(state: GraphState) -> dict:
         "route_reason": result.route_reason,
         "confidence":   result.confidence,
         "rationale":    result.rationale,
+        "tools":        result.tools,
+        "tool_rationale": result.tool_rationale,
         "latency_ms":   ms,
     })
     await rt.emit("decompose_done", {
@@ -278,6 +299,8 @@ async def node_analyze(state: GraphState) -> dict:
         "rationale":       result.rationale,
         "route_reason":    result.route_reason,
         "confidence":      result.confidence,
+        "tools":           result.tools,
+        "tool_rationale":  result.tool_rationale,
         "latency_ms":      ms,
     })
     return {
@@ -288,6 +311,9 @@ async def node_analyze(state: GraphState) -> dict:
         "rationale": result.rationale,
         "route_reason": result.route_reason,
         "confidence": result.confidence,
+        "tools": result.tools,
+        "tool_rationale": result.tool_rationale,
+        "tool_input": result.tool_input,
         "rewrote": result.rewrote,
     }
 
@@ -299,6 +325,49 @@ async def node_parametric_answer(state: GraphState, config: Any = None) -> dict:
     answer = state.get("parametric_answer") or ""
     await _replay_string_as_tokens(rt, 0, answer, state["query"])
     return {
+        "final_answer": answer,
+        "citations": [],
+        "urls": [],
+        "all_chunks": [],
+        "traces": [],
+    }
+
+
+# ── Node: calculator_answer ───────────────────────────────────────────────────
+
+async def node_calculator_answer(state: GraphState, config: Any = None) -> dict:
+    rt = get_runtime()
+    expression = (state.get("tool_input") or "").strip()
+    if not expression:
+        await rt.emit("tool_fallback", {
+            "tool": "calculator",
+            "reason": "missing_expression",
+            "fallback": "web_search",
+        })
+        return {"mode": "search", "sub_queries": [state.get("rewritten_query") or state["query"]]}
+
+    try:
+        calc = _traced_calculator(expression)
+    except CalculatorError as exc:
+        await rt.emit("tool_fallback", {
+            "tool": "calculator",
+            "reason": str(exc),
+            "expression": expression,
+            "fallback": "web_search",
+        })
+        return {"mode": "search", "sub_queries": [state.get("rewritten_query") or state["query"]]}
+
+    answer = calc.answer_text
+    await rt.emit("tool_done", {
+        "tool": "calculator",
+        "expression": calc.expression,
+        "result": answer,
+        "safe_eval": True,
+    })
+    await _replay_string_as_tokens(rt, 0, answer, state["query"])
+    return {
+        "mode": "parametric",
+        "parametric_answer": answer,
         "final_answer": answer,
         "citations": [],
         "urls": [],
@@ -355,9 +424,21 @@ async def node_search_urls(state: GraphState, config: Any = None) -> dict:
     rt = get_runtime()
     sub_queries: List[str] = state["sub_queries"]
     max_results = state.get("max_results", 6)
+    tools = state.get("tools") or ["web_search"]
 
     t0 = time.perf_counter()
-    search_tasks = [_traced_discover_urls(sq, max_results) for sq in sub_queries]
+    async def _discover_one(sq: str) -> tuple[list[SearchResult], str | None]:
+        if "academic_search" in tools and "web_search" not in tools:
+            try:
+                academic_results = await _traced_academic_search(sq, max_results)
+                if academic_results:
+                    return academic_results, None
+            except Exception as exc:
+                logger.warning("[search] academic_search failed; falling back to Tavily: %s", exc)
+            return await _traced_discover_urls(sq, max_results)
+        return await _traced_discover_urls(sq, max_results)
+
+    search_tasks = [_discover_one(sq) for sq in sub_queries]
     search_pairs = await asyncio.gather(*search_tasks)
     all_results_lists = [pair[0] for pair in search_pairs]
     per_sq_errors = [pair[1] for pair in search_pairs]
@@ -405,6 +486,7 @@ async def node_search_urls(state: GraphState, config: Any = None) -> dict:
         "returned":           len(search_results),
         "dropped_duplicates": dropped_duplicates,
         "error_reason":       next((r for r in per_sq_errors if r), None),
+        "tools":              tools,
     })
 
     # Stash intermediates for downstream pipeline nodes
@@ -1362,11 +1444,17 @@ async def node_emit_done(state: GraphState, config: Any = None) -> dict:
 # ── Routing edges ─────────────────────────────────────────────────────────────
 
 def _route_after_analyze(state: GraphState) -> str:
+    if "calculator" in (state.get("tools") or []):
+        return "calculator_answer"
     # `unsupported` reuses the parametric replay path — the polite-decline message
     # was already produced by the router LLM and lives in state["parametric_answer"].
     if state.get("mode") in ("parametric", "unsupported"):
         return "parametric_answer"
     return "cache_lookup"
+
+
+def _route_after_calculator(state: GraphState) -> str:
+    return "cache_lookup" if state.get("mode") == "search" else "emit_done"
 
 
 def _route_after_cache_lookup(state: GraphState) -> str:
@@ -1399,6 +1487,7 @@ def build_pipeline_graph():
     g.add_node("rewrite_query", node_rewrite_query)
     g.add_node("analyze", node_analyze)
     g.add_node("parametric_answer", node_parametric_answer)
+    g.add_node("calculator_answer", node_calculator_answer)
     g.add_node("cache_lookup", node_cache_lookup)
     g.add_node("cache_replay", node_cache_replay)
     g.add_node("search_urls", node_search_urls)
@@ -1416,6 +1505,10 @@ def build_pipeline_graph():
     g.add_edge("rewrite_query", "analyze")
     g.add_conditional_edges("analyze", _route_after_analyze,
                             {"parametric_answer": "parametric_answer",
+                             "calculator_answer": "calculator_answer",
+                             "cache_lookup": "cache_lookup"})
+    g.add_conditional_edges("calculator_answer", _route_after_calculator,
+                            {"emit_done": "emit_done",
                              "cache_lookup": "cache_lookup"})
     g.add_conditional_edges("cache_lookup", _route_after_cache_lookup,
                             {"cache_replay": "cache_replay",

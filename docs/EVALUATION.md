@@ -1,6 +1,6 @@
 # WebLens Evaluation
 
-The evaluation framework lives in `evals/run_eval.py` and the benchmark data lives in `evals/question_dataset/`. It was rewritten in v7 to be lean (5 core metrics, ~30 elite questions), async-concurrent, and produce a usable failure-mode report — not an academic benchmark.
+The evaluation framework lives in `evals/run_eval.py` and the benchmark data lives in `evals/question_dataset/`. It was rewritten in v7 to be lean (5 core metrics), async-concurrent, and produce a usable failure-mode report — not an academic benchmark.
 
 ## Philosophy
 
@@ -32,7 +32,7 @@ Reported per-question and in summary, but **not averaged** into the aggregate sc
 
 ## Benchmark structure
 
-`evals/question_dataset/benchmark.json` — 30 single-turn questions:
+`evals/question_dataset/benchmark.json` — 52 single-turn questions:
 
 | Category | N | What it tests |
 |---|---|---|
@@ -58,10 +58,10 @@ Reported per-question and in summary, but **not averaged** into the aggregate sc
 ## How to run
 
 ```bash
-# 6 smoke questions (one per major category), tracing on by default
+# 11 representative smoke questions, tracing on by default
 python evals/run_eval.py --smoke
 
-# 30 single-turn questions, tracing off by default (cheaper)
+# 52 single-turn questions, tracing off by default (cheaper)
 python evals/run_eval.py --full
 
 # 5 multi-turn scenarios — turns within a scenario run serially
@@ -85,7 +85,7 @@ The server must be running (`uvicorn app:app --port 8000`) — the eval harness 
 |---|---|
 | `--smoke` | **on** — full per-node visibility while iterating |
 | `--multiturn` | **on** |
-| `--full` | **off** — saves cost on a 30-question run |
+| `--full` | **off** — saves cost on a 52-question run |
 | `--all` | **off** |
 
 `--trace on` sends an `X-Langsmith-Trace: true` header with each pipeline request. The server wraps that request's LangGraph run in `tracing_context(enabled=True)`, so only eval-triggered requests generate traces — normal user traffic is never traced. Traces appear in the `weblens` project on smith.langchain.com.
@@ -173,8 +173,8 @@ Ground truth for temporal/numerical questions should be sourced from authoritati
 
 ## Cost
 
-- **Smoke run** (6 questions, judge enabled): ~3 LLM judge calls per question × 6 = 18 calls. On DeepSeek that's roughly $0.005 per run.
-- **Full run** (30 questions): ~90 judge calls ≈ $0.025 per run.
+- **Smoke run** (11 questions, judge enabled): ~3 LLM judge calls per question × 11 = 33 calls.
+- **Full run** (52 questions): ~156 judge calls.
 - **Multi-turn** (~12 turns): ~36 judge calls ≈ $0.01 per run.
 
 Pipeline LLM cost (analyze + generate + synthesize) is separate and depends on the model — see the `latency_breakdown.token_cost` field in each per-question JSON.

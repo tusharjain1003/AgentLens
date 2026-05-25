@@ -13,8 +13,8 @@ Five core metrics + two diagnostic metrics:
         - latency               (pipeline_seconds + per-stage breakdown)
 
 Run modes:
-    --smoke      6 questions (one per major category)
-    --full       30 single-turn questions
+    --smoke      11 representative questions
+    --full       52 single-turn questions
     --multiturn  5 scenarios (~12 turns)
     --all        full + multiturn
 
@@ -1240,8 +1240,8 @@ async def main(mode: str, base_url: str, trace: str, judge: Optional[str], concu
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="WebLens RAG eval harness v7")
-    parser.add_argument("--smoke",     action="store_true", help="6 questions (one per major category)")
-    parser.add_argument("--full",      action="store_true", help="30 single-turn questions")
+    parser.add_argument("--smoke",     action="store_true", help="11 representative questions")
+    parser.add_argument("--full",      action="store_true", help="52 single-turn questions")
     parser.add_argument("--multiturn", action="store_true", help="5 multi-turn scenarios")
     parser.add_argument("--all",       action="store_true", help="full + multiturn")
     parser.add_argument("--url",       default=DEFAULT_URL, help="Server base URL")

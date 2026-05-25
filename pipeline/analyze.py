@@ -40,6 +40,9 @@ class AnalyzeResult:
     # Phase 1/2 — surfaced for trace visibility and frontend display.
     route_reason: str = ""           # ≤15-word free-text explanation of mode choice
     confidence: Optional[float] = None  # 0.0–1.0; None if LLM omitted it
+    tools: List[str] = field(default_factory=list)
+    tool_rationale: str = ""
+    tool_input: Optional[str] = None
 
 
 @dataclass
@@ -178,6 +181,9 @@ Output ONE valid JSON object — no prose, no markdown — with this shape:
   "mode": "parametric" | "search" | "unsupported",
   "sub_queries": [string, ...],
   "answer": string | null,
+  "tools": ["direct_answer" | "calculator" | "web_search" | "academic_search", ...],
+  "tool_rationale": string,
+  "tool_input": string | null,
   "rationale": string,
   "route_reason": string,
   "confidence": number
@@ -219,6 +225,16 @@ and offers what WebLens *can* do instead (e.g. structured text + sources). Set
 
 {capabilities_block}
 
+## Tool selection
+
+Always select the smallest sufficient tool list:
+- `direct_answer` — greetings, capability questions, stable definitions, and stable facts.
+- `calculator` — arithmetic, percentages, unit-free calculations. Put the safe arithmetic expression in `tool_input`; use only numbers, parentheses, +, -, *, /, **, and %. Example: `340 * 0.15`.
+- `web_search` — current, source-dependent, comparative, subjective, or explicitly cited questions.
+- `academic_search` — scholarly-paper discovery, arXiv/Semantic Scholar style research questions. Use with `mode="search"`.
+
+For backward compatibility, `mode="search"` with no tools is treated as `["web_search"]`, and `mode="parametric"` with no tools is treated as `["direct_answer"]`.
+
 ## Bias and tie-breaking
 
 Choose the mode the user is most likely to want. Bias toward `parametric` for
@@ -248,6 +264,9 @@ For `parametric` and `unsupported`, set `sub_queries` to `[original_question]`.
 
 - `answer` — for parametric/unsupported: the response shown to the user (≤200 words for
   parametric, ≤60 words for unsupported). For search: `null`.
+- `tools` — selected tool names from the allow-list above.
+- `tool_rationale` — one short sentence explaining why these tools are sufficient.
+- `tool_input` — calculator expression when `tools` includes `calculator`; otherwise `null`.
 - `rationale` — one short sentence (≤20 words) for internal tracing.
 - `route_reason` — ≤15-word user-facing explanation (e.g. "greeting", "stable CS concept",
   "current pricing requires sources", "PDF export not supported").
@@ -256,34 +275,37 @@ For `parametric` and `unsupported`, set `sub_queries` to `[original_question]`.
 ## Examples
 
 Q: "hi"
-{{"mode":"parametric","sub_queries":["hi"],"answer":"Hi! Ask me anything — I'll search the web, read pages, and answer with cited sources.","rationale":"Greeting.","route_reason":"greeting","confidence":0.98}}
+{{"mode":"parametric","sub_queries":["hi"],"answer":"Hi! Ask me anything — I'll search the web, read pages, and answer with cited sources.","tools":["direct_answer"],"tool_rationale":"Greeting needs no external source.","tool_input":null,"rationale":"Greeting.","route_reason":"greeting","confidence":0.98}}
 
 Q: "what can you do?"
-{{"mode":"parametric","sub_queries":["what can you do?"],"answer":"I'm WebLens — I answer questions by searching the web, reading the full pages, and citing the sources I used. I support multi-turn conversations and follow-up questions. I don't yet generate PDFs, diagrams, or downloadable files.","rationale":"Capability/meta question.","route_reason":"identity/capability","confidence":0.97}}
+{{"mode":"parametric","sub_queries":["what can you do?"],"answer":"I'm WebLens — I answer questions by searching the web, reading the full pages, and citing the sources I used. I support multi-turn conversations and follow-up questions. I don't yet generate PDFs, diagrams, or downloadable files.","tools":["direct_answer"],"tool_rationale":"Capability answer is stable app metadata.","tool_input":null,"rationale":"Capability/meta question.","route_reason":"identity/capability","confidence":0.97}}
 
 Q: "explain transformers"
-{{"mode":"parametric","sub_queries":["explain transformers"],"answer":"Transformers are a neural-network architecture introduced in \\"Attention Is All You Need\\" (2017). They replace recurrence with self-attention: each token attends to every other token via learned query/key/value projections, producing weighted context vectors. Stacked layers of multi-head attention plus feed-forward blocks and residual connections enable parallel training and strong long-range modeling, which made them the basis of modern LLMs.","rationale":"Stable ML concept.","route_reason":"textbook ML concept","confidence":0.9}}
+{{"mode":"parametric","sub_queries":["explain transformers"],"answer":"Transformers are a neural-network architecture introduced in \\"Attention Is All You Need\\" (2017). They replace recurrence with self-attention: each token attends to every other token via learned query/key/value projections, producing weighted context vectors. Stacked layers of multi-head attention plus feed-forward blocks and residual connections enable parallel training and strong long-range modeling, which made them the basis of modern LLMs.","tools":["direct_answer"],"tool_rationale":"Stable ML concept needs no live retrieval.","tool_input":null,"rationale":"Stable ML concept.","route_reason":"textbook ML concept","confidence":0.9}}
 
 Q: "What is 12 squared?"
-{{"mode":"parametric","sub_queries":["What is 12 squared?"],"answer":"144.","rationale":"Arithmetic.","route_reason":"arithmetic","confidence":0.99}}
+{{"mode":"parametric","sub_queries":["What is 12 squared?"],"answer":null,"tools":["calculator"],"tool_rationale":"Arithmetic can be solved exactly with calculator.","tool_input":"12 ** 2","rationale":"Arithmetic.","route_reason":"calculator arithmetic","confidence":0.99}}
 
 Q: "What is a binary search tree?"
-{{"mode":"parametric","sub_queries":["What is a binary search tree?"],"answer":"A binary search tree (BST) is a binary tree where each node has a key, and for every node the keys in its left subtree are less than the node's key and the keys in its right subtree are greater. This ordering enables average-case O(log n) lookup, insert, and delete; worst-case is O(n) for unbalanced trees, motivating self-balancing variants like AVL and red-black trees.","rationale":"Textbook CS concept.","route_reason":"stable CS concept","confidence":0.95}}
+{{"mode":"parametric","sub_queries":["What is a binary search tree?"],"answer":"A binary search tree (BST) is a binary tree where each node has a key, and for every node the keys in its left subtree are less than the node's key and the keys in its right subtree are greater. This ordering enables average-case O(log n) lookup, insert, and delete; worst-case is O(n) for unbalanced trees, motivating self-balancing variants like AVL and red-black trees.","tools":["direct_answer"],"tool_rationale":"Stable CS definition needs no live retrieval.","tool_input":null,"rationale":"Textbook CS concept.","route_reason":"stable CS concept","confidence":0.95}}
 
 Q: "best Udemy courses on Agentic AI"
-{{"mode":"search","sub_queries":["Best Udemy courses on Agentic AI in 2026 with ratings and instructors"],"answer":null,"rationale":"Course catalog drifts; needs current sources.","route_reason":"current recommendations require sources","confidence":0.95}}
+{{"mode":"search","sub_queries":["Best Udemy courses on Agentic AI in 2026 with ratings and instructors"],"answer":null,"tools":["web_search"],"tool_rationale":"Course catalog and ratings drift over time.","tool_input":null,"rationale":"Course catalog drifts; needs current sources.","route_reason":"current recommendations require sources","confidence":0.95}}
 
 Q: "Compare PostgreSQL and MySQL for OLTP workloads."
-{{"mode":"search","sub_queries":["PostgreSQL strengths and weaknesses for OLTP workloads","MySQL strengths and weaknesses for OLTP workloads"],"answer":null,"rationale":"Comparison benefits from sourced evidence.","route_reason":"comparison benefits from sources","confidence":0.85}}
+{{"mode":"search","sub_queries":["PostgreSQL strengths and weaknesses for OLTP workloads","MySQL strengths and weaknesses for OLTP workloads"],"answer":null,"tools":["web_search"],"tool_rationale":"Comparison benefits from sourced evidence.","tool_input":null,"rationale":"Comparison benefits from sourced evidence.","route_reason":"comparison benefits from sources","confidence":0.85}}
 
 Q: "Who won the Champions League final in 2024?"
-{{"mode":"search","sub_queries":["UEFA Champions League final 2024 winner and score"],"answer":null,"rationale":"Recent sports result.","route_reason":"recent event","confidence":0.97}}
+{{"mode":"search","sub_queries":["UEFA Champions League final 2024 winner and score"],"answer":null,"tools":["web_search"],"tool_rationale":"Sports result should be verified from sources.","tool_input":null,"rationale":"Recent sports result.","route_reason":"recent event","confidence":0.97}}
+
+Q: "Find recent RLHF papers from 2025"
+{{"mode":"search","sub_queries":["Recent RLHF research papers from 2025 and their main contributions"],"answer":null,"tools":["academic_search"],"tool_rationale":"Paper discovery is best handled by academic search.","tool_input":null,"rationale":"Academic literature query.","route_reason":"academic paper discovery","confidence":0.9}}
 
 Q: "Export this answer as a PDF"
-{{"mode":"unsupported","sub_queries":["Export this answer as a PDF"],"answer":"I can't generate PDFs yet — but I can give you a structured answer with sources that you can copy or print from your browser.","rationale":"Artifact not supported.","route_reason":"PDF export not supported","confidence":0.99}}
+{{"mode":"unsupported","sub_queries":["Export this answer as a PDF"],"answer":"I can't generate PDFs yet — but I can give you a structured answer with sources that you can copy or print from your browser.","tools":["direct_answer"],"tool_rationale":"Unsupported artifact request should be declined directly.","tool_input":null,"rationale":"Artifact not supported.","route_reason":"PDF export not supported","confidence":0.99}}
 
 Q: "Draw me a diagram of how transformers work"
-{{"mode":"unsupported","sub_queries":["Draw me a diagram of how transformers work"],"answer":"I can't generate diagrams yet — but I can describe the transformer architecture in detail with text, and link to diagrams from published sources if you'd like.","rationale":"Artifact not supported.","route_reason":"diagram generation not supported","confidence":0.97}}
+{{"mode":"unsupported","sub_queries":["Draw me a diagram of how transformers work"],"answer":"I can't generate diagrams yet — but I can describe the transformer architecture in detail with text, and link to diagrams from published sources if you'd like.","tools":["direct_answer"],"tool_rationale":"Unsupported artifact request should be declined directly.","tool_input":null,"rationale":"Artifact not supported.","route_reason":"diagram generation not supported","confidence":0.97}}
 
 Now analyze the user's question.
 """
@@ -472,6 +494,8 @@ async def route_and_decompose(rewritten: str, rewrote: bool) -> AnalyzeResult:
             rationale="analyze fallback (LLM error)",
             route_reason="router error",
             confidence=None,
+            tools=["web_search"],
+            tool_rationale="Fallback to web search after router error.",
             rewrote=rewrote,
         )
 
@@ -485,6 +509,8 @@ async def route_and_decompose(rewritten: str, rewrote: bool) -> AnalyzeResult:
             rationale="analyze fallback (parse error)",
             route_reason="router parse error",
             confidence=None,
+            tools=["web_search"],
+            tool_rationale="Fallback to web search after router parse error.",
             rewrote=rewrote,
         )
 
@@ -518,6 +544,26 @@ async def route_and_decompose(rewritten: str, rewrote: bool) -> AnalyzeResult:
 
     rationale = str(parsed.get("rationale", "")).strip()[:200]
     route_reason = str(parsed.get("route_reason", "")).strip()[:120]
+    allowed_tools = {"direct_answer", "calculator", "web_search", "academic_search"}
+    tools_raw = parsed.get("tools") or []
+    if isinstance(tools_raw, str):
+        tools_raw = [tools_raw]
+    if not isinstance(tools_raw, list):
+        tools_raw = []
+    tools = [
+        str(t).strip()
+        for t in tools_raw
+        if str(t).strip() in allowed_tools
+    ]
+    if not tools:
+        tools = ["web_search"] if mode == "search" else ["direct_answer"]
+    if mode == "search" and "direct_answer" in tools:
+        tools = [t for t in tools if t != "direct_answer"] or ["web_search"]
+    if mode in ("parametric", "unsupported") and "web_search" in tools:
+        tools = [t for t in tools if t != "web_search"] or ["direct_answer"]
+    tool_rationale = str(parsed.get("tool_rationale", "")).strip()[:240]
+    tool_input_raw = parsed.get("tool_input")
+    tool_input = str(tool_input_raw).strip()[:200] if tool_input_raw is not None else None
 
     confidence: Optional[float]
     try:
@@ -552,6 +598,9 @@ async def route_and_decompose(rewritten: str, rewrote: bool) -> AnalyzeResult:
         rationale=rationale,
         route_reason=route_reason,
         confidence=confidence,
+        tools=tools,
+        tool_rationale=tool_rationale,
+        tool_input=tool_input,
         rewrote=rewrote,
     )
 

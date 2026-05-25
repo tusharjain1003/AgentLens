@@ -16,3 +16,12 @@ def test_extract_json_object_from_fenced_json():
 def test_extract_json_object_returns_none_for_invalid_json():
     assert _extract_json_object("not json") is None
     assert _extract_json_object("{bad json}") is None
+
+
+def test_extract_json_object_with_tool_fields():
+    parsed = _extract_json_object(
+        '{"mode":"parametric","tools":["calculator"],"tool_input":"340 * 0.15"}'
+    )
+
+    assert parsed["tools"] == ["calculator"]
+    assert parsed["tool_input"] == "340 * 0.15"

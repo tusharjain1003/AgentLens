@@ -98,10 +98,11 @@ jobs:
             const root = "evals/results";
             let body = "Smoke eval did not produce a summary.";
             if (fs.existsSync(root)) {
-              const dirs = fs.readdirSync(root).sort();
-              const latest = dirs.reverse().find((d) => d.endsWith("_smoke"));
+              const smokeRoot = path.join(root, "smoke");
+              const dirs = fs.existsSync(smokeRoot) ? fs.readdirSync(smokeRoot).sort() : [];
+              const latest = dirs.reverse()[0];
               if (latest) {
-                const summaryPath = path.join(root, latest, "summary.json");
+                const summaryPath = path.join(smokeRoot, latest, "summary.json");
                 if (fs.existsSync(summaryPath)) {
                   const s = JSON.parse(fs.readFileSync(summaryPath, "utf8"));
                   const m = s.metrics_avg || {};
