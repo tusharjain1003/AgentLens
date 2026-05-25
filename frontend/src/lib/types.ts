@@ -132,7 +132,7 @@ export type SseEvent =
   | { event: "sub_answer_done"; data: { index: number; latency_ms: number; cancelled?: boolean; error?: string } }
   | { event: "synthesis_start"; data: {} }
   | { event: "token"; data: { text: string } }
-  | { event: "done"; data: { session_id: string; citations: Citation[]; total_latency_ms: number; latency_breakdown: Record<string, any>; followups?: string[] } }
+  | { event: "done"; data: { session_id: string; message_id?: number | null; citations: Citation[]; total_latency_ms: number; latency_breakdown: Record<string, any>; followups?: string[] } }
   | { event: "error"; data: { message: string; reason?: ErrorReason; failures?: ExtractFailure[] } };
 
 // ── Chat store shapes ────────────────────────────────────────────────────────
@@ -212,6 +212,7 @@ export interface Turn {
   /** 0-based index inside the version group, in submission order. */
   versionIndex: number;
   question: string;
+  messageId?: number | null;
   status: "streaming" | "done" | "stopped" | "error";
   errorMsg?: string;
   subQueries: string[];

@@ -158,7 +158,7 @@ interface ChatStore {
   sidebarOpen: boolean;
   loadingSessionId: string | null;
   reactions: Record<string, "like" | "dislike" | undefined>;
-  setReaction: (turnId: string, r: "like" | "dislike" | null) => void;
+  setReaction: (turnId: string, r: "like" | "dislike" | null) => Promise<void>;
   /** versionGroupId → index of the currently displayed sibling. */
   selectedVersion: Record<string, number>;
   selectVersion: (groupId: string, index: number) => void;
@@ -196,12 +196,31 @@ export const useChat = create<ChatStore>((set, get) => ({
   sidebarOpen: typeof window !== "undefined" ? window.matchMedia("(min-width: 768px)").matches : true,
   loadingSessionId: null,
   reactions: {},
-  setReaction: (turnId, r) => set((s) => {
-    const next = { ...s.reactions };
-    if (r === null) delete next[turnId];
-    else next[turnId] = r;
-    return { reactions: next };
-  }),
+  setReaction: async (turnId, r) => {
+    const turn = get().turns.find((t) => t.id === turnId);
+    set((s) => {
+      const next = { ...s.reactions };
+      if (r === null) delete next[turnId];
+      else next[turnId] = r;
+      return { reactions: next };
+    });
+    if (!turn?.messageId) return;
+    try {
+      await api.submitFeedback({
+        session_id: get().sessionId,
+        message_id: turn.messageId,
+        rating: r === "like" ? 1 : r === "dislike" ? -1 : 0,
+        feedback_type: "overall",
+        metadata: {
+          turn_id: turn.id,
+          version_group_id: turn.versionGroupId,
+          version_index: turn.versionIndex,
+        },
+      });
+    } catch (err) {
+      console.warn("[feedback] submit failed", err);
+    }
+  },
   selectedVersion: {},
   selectVersion: (groupId, index) =>
     set((s) => ({ selectedVersion: { ...s.selectedVersion, [groupId]: index } })),
@@ -258,6 +277,7 @@ export const useChat = create<ChatStore>((set, get) => ({
           : undefined;
         const turn: Turn = {
           id: `hydrated-${m.id}`,
+          messageId: m.id,
           // Each hydrated turn is its own group — version history isn't
           // persisted to DB yet, so loaded sessions show each row as a single
           // version. Live retries in this session still group correctly.
@@ -732,6 +752,7 @@ export const useChat = create<ChatStore>((set, get) => ({
         }
         case "done": {
           const tNow = Date.now();
+          t.messageId = e.data.message_id ?? null;
           t.totalLatencyMs = e.data.total_latency_ms;
           t.citations = e.data.citations;
           // Build display-time renumber so [N]s start at 1 even after backend

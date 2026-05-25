@@ -211,15 +211,20 @@ async def save_message(
     total_latency_ms: int,
     sub_queries: list | None = None,
     traces: list | None = None,
-) -> None:
-    """Insert a completed Q&A message with full pipeline trace."""
+) -> Optional[int]:
+    """Insert a completed Q&A message with full pipeline trace.
+
+    Returns the new row's ``id`` (for use by the feedback endpoint), or
+    ``None`` on failure.
+    """
     try:
-        await db.execute(
+        row = await db.fetchrow(
             """
             INSERT INTO rag_session_messages
               (session_id, question, answer, citations, urls, chunks,
                latency_breakdown, total_latency_ms, sub_queries, traces)
             VALUES ($1,$2,$3,$4::jsonb,$5::jsonb,$6::jsonb,$7::jsonb,$8,$9::jsonb,$10::jsonb)
+            RETURNING id
             """,
             session_id,
             question,
@@ -233,8 +238,10 @@ async def save_message(
             json.dumps(traces or []),
         )
         await update_session_title(session_id, question)
+        return row["id"] if row else None
     except Exception as exc:
         logger.warning("[session] save_message failed: %s", exc)
+        return None
 
 
 async def get_session(session_id: str) -> Optional[dict]:

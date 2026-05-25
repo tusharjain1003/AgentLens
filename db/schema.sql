@@ -91,3 +91,20 @@ CREATE TABLE IF NOT EXISTS query_cache (
 CREATE INDEX IF NOT EXISTS query_cache_embedding_idx
     ON query_cache USING ivfflat (query_embedding vector_cosine_ops) WITH (lists = 50);
 CREATE INDEX IF NOT EXISTS query_cache_expires_idx ON query_cache (expires_at);
+
+-- ── Human feedback (Phase 3.13) ───────────────────────────────────────────
+-- Stores thumbs up/down per message plus optional free-text correction.
+CREATE TABLE IF NOT EXISTS rag_feedback (
+    id              BIGSERIAL PRIMARY KEY,
+    session_id      TEXT NOT NULL,
+    message_id      BIGINT NOT NULL,       -- rag_session_messages.id
+    rating          SMALLINT NOT NULL CHECK (rating IN (-1, 0, 1)),  -- -1=thumbs-down, 0=neutral, 1=thumbs-up
+    correction      TEXT DEFAULT '',         -- optional free-text correction
+    feedback_type   TEXT DEFAULT 'overall',  -- 'overall' | 'citation'
+    citation_num    INTEGER,                -- specific [N] being reported, when feedback_type='citation'
+    metadata        JSONB DEFAULT '{}',      -- extra context (mode, sub_queries count, etc.)
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS rag_feedback_sid_idx ON rag_feedback (session_id, message_id);
+CREATE INDEX IF NOT EXISTS rag_feedback_rating_idx ON rag_feedback (rating);

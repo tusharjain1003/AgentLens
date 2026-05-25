@@ -11,6 +11,16 @@ async function jsonGet<T>(path: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+async function jsonPost<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json() as Promise<T>;
+}
+
 export interface HealthResponse {
   status: "ok";
   env: string;
@@ -30,4 +40,13 @@ export const api = {
   evalRuns: () => jsonGet<EvalRunSummary[]>("/api/eval/results"),
   evalRunDetail: (runId: string) => jsonGet<EvalRunDetail>(`/api/eval/results/${runId}`),
   evalQuestions: (set: string) => jsonGet<any>(`/api/eval/questions?set=${encodeURIComponent(set)}`),
+  submitFeedback: (payload: {
+    session_id: string;
+    message_id: number;
+    rating: -1 | 0 | 1;
+    correction?: string;
+    feedback_type?: "overall" | "citation";
+    citation_num?: number | null;
+    metadata?: Record<string, unknown>;
+  }) => jsonPost<{ id: number; status: string }>("/api/feedback", payload),
 };
