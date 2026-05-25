@@ -13,6 +13,7 @@
 
 ## Table of Contents
 
+- [Visual Tour](#visual-tour)
 - [Architecture Overview](#architecture-overview)
 - [Pipeline Walkthrough](#pipeline-walkthrough)
 - [Key Features](#key-features)
@@ -27,6 +28,24 @@
 
 ---
 
+## Visual Tour
+
+Representative screenshots from the app flow. Duplicate states such as the about modal and pre-submit input screen are intentionally omitted here; the full set lives in [`screenshots/`](screenshots/).
+
+| Home | Streaming Search |
+|------|------------------|
+| ![AgentLens landing page with example prompts and dark interface](screenshots/01-landing-page.png) | ![AgentLens streaming search results and live pipeline state](screenshots/04-streaming-search-results.png) |
+
+| Completed Answer | Expanded Reasoning Trace |
+|------------------|--------------------------|
+| ![Completed grounded answer with citations in AgentLens](screenshots/05-answer-complete.png) | ![Expanded per-subquery reasoning trace showing retrieval and generation steps](screenshots/06-reasoning-trace-expanded.png) |
+
+| Citations & Follow-ups | Session History |
+|------------------------|-----------------|
+| ![Citation preview chips and generated follow-up questions](screenshots/07-citations-and-followups.png) | ![Session history sidebar with previous AgentLens conversations](screenshots/09-session-history.png) |
+
+---
+
 ## Architecture Overview
 
 AgentLens answers natural-language questions by orchestrating real-time web retrieval, full-page extraction, hybrid semantic search, cross-encoder reranking, reflection-based gap recovery, claim verification, and LLM synthesis — all streamed to the frontend via Server-Sent Events before the pipeline completes.
@@ -36,6 +55,47 @@ AgentLens answers natural-language questions by orchestrating real-time web retr
 1. **Every query passes through an LLM.** No heuristic routing. The `analyze` node makes a reasoned routing decision — parametric vs. search — using few-shot classification with a strong search bias.
 2. **Streaming must start in under 3 seconds.** LangGraph + asyncio concurrency ensures first SSE events fire ~500ms in; first tokens within ~3s regardless of pipeline depth.
 3. **Retrieval is global, not per-sub-query.** Extraction runs once on the deduplicated URL union — eliminating redundant fetches and ensuring citation number consistency across sub-answers.
+
+### System Diagram
+
+```mermaid
+graph TB
+    UI["React SPA<br/>Zustand + Tailwind"] -->|"POST /api/search"| API["FastAPI<br/>SSE stream"]
+    API --> GRAPH["LangGraph StateGraph<br/>rewrite · analyze · search · retrieve · verify"]
+    GRAPH -->|"tokens + events"| UI
+
+    GRAPH --> SEARCH["Tavily<br/>URL discovery"]
+    GRAPH --> EXTRACT["Jina Reader<br/>trafilatura fallback"]
+    GRAPH --> RETRIEVE["Hybrid retrieval<br/>BM25 + MiniLM + RRF + TinyBERT"]
+    GRAPH --> LLM["DeepSeek V3<br/>OpenAI fallback"]
+
+    API --> DB["Supabase Postgres + pgvector<br/>sessions · traces · feedback"]
+    EXTRACT --> CACHE["page_cache"]
+    RETRIEVE --> VEC["web_chunks + query_cache<br/>IVFFlat vector indexes"]
+    GRAPH -.-> OBS["LangSmith spans<br/>eval artifacts"]
+```
+
+### Request Lifecycle
+
+```mermaid
+flowchart TD
+    Q["User query"] --> RW["Rewrite with history"]
+    RW --> AN["Analyze: route + decompose"]
+    AN -->|parametric| PA["Direct LLM answer"]
+    AN -->|search| QC["Semantic cache lookup"]
+    QC -->|hit| REPLAY["Replay cached answer"]
+    QC -->|miss| S["Parallel web search"]
+    S --> E["Full-page extraction"]
+    E --> C["Heading-aware chunking"]
+    C --> R["Hybrid retrieve + rerank"]
+    R --> G["Concurrent sub-answer generation"]
+    G --> REF["Reflect on coverage gaps"]
+    REF --> SYN["Synthesize final answer"]
+    SYN --> VER["Verify claim support"]
+    PA --> DONE["Persist + SSE done"]
+    REPLAY --> DONE
+    VER --> DONE
+```
 
 ---
 
