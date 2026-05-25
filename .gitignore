@@ -221,6 +221,21 @@ __marimo__/
 # Smoke evaluation
 evals/results/smoke
 
+# Eval run results (generated artifacts)
+evals/results/
+
+# Internal planning / personal docs
+implementation_plan.md
+review.md
+docs/INTERVIEW.md
+docs/RESUME-ONE-PAGER.md
+docs/OVERALL-IMPROVEMENT-SUMMARY.md
+docs/evaluation-results-summary.md
+docs/how-to-run.md
+docs/launch.md
+docs/implementation-summary-*
+evals/docs/improvement-summary-*
+
 # Local scratch / generated artifacts
 tmp/
 *.tsbuildinfo
