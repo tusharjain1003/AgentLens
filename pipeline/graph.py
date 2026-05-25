@@ -40,6 +40,7 @@ without changes. NEW events: `rewrite_done`, `page_cache_info`,
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -59,6 +60,8 @@ from pipeline.extract import extract_pages as _extract_pages
 from pipeline.embed import upsert_chunks
 from pipeline.followups import generate_followups
 from pipeline.generate import build_citations, generate_stream, strip_unknown_links, synthesize_stream
+from pipeline.analyze import _extract_json_object
+from llm.openai_client import get_llm
 from pipeline.retrieve import retrieve
 from pipeline.runtime import RuntimeContext, get_runtime, reset_runtime, set_runtime
 from pipeline.search import SearchResult, discover_urls
@@ -148,6 +151,12 @@ def _traced_calculator(expression: str):
     return evaluate_expression(expression)
 
 
+@traceable(run_type="chain", name="Reflect on answer coverage")
+async def _traced_reflect(prompt: str, system: str):
+    llm = get_llm()
+    return await asyncio.wait_for(llm.acomplete(prompt, system=system, max_tokens=500), timeout=3.0)
+
+
 logger = logging.getLogger(__name__)
 
 REPLAY_CHUNK_CHARS = 8  # tokens-per-yield when replaying parametric / cached answers
@@ -168,6 +177,7 @@ class GraphState(TypedDict, total=False):
     max_results: int
     top_k: int
     cache_enabled: Optional[bool]   # None → fall back to settings.semantic_cache_enabled
+    reflection_enabled: bool
     # Analyze outputs
     mode: Literal["parametric", "search", "cache", "unsupported"]
     rewritten_query: str
@@ -194,6 +204,16 @@ class GraphState(TypedDict, total=False):
     urls: list
     all_chunks: list
     traces: list
+    sub_answers: list
+    reflection_iteration: int
+    reflection_gaps: list
+    reflection_triggered: bool
+    reflection_enabled: bool
+    base_sub_answers: list
+    base_traces: list
+    base_citation_map: dict
+    base_citations: list
+    base_all_chunks: list
     latency_breakdown: dict
     followups: list
     error: Optional[str]
@@ -931,8 +951,221 @@ async def node_generate_answers(state: GraphState, config: Any = None) -> dict:
         "urls": rt.workspace.get("urls") or [],
         "all_chunks": _all_chunks_flat,
         "traces": traces,
+        "sub_answers": sub_answers,
         "mode": "search",
     }
+
+
+# ── Node: reflect (cached-only gap detection + merge) ─────────────────────────
+
+_REFLECT_SYSTEM = """\
+You are a coverage-checking reflection step for a web RAG pipeline.
+
+Decide whether the answer fully covers the user's question using only the
+already-retrieved source chunks. Do not ask for web search. If important parts
+are missing, produce at most 2 focused gap sub-queries that can be run against
+the existing chunk set.
+
+Return one JSON object:
+{"complete": boolean, "gap_queries": [string, ...], "reason": string}
+"""
+
+
+async def node_reflect(state: GraphState, config: Any = None) -> dict:
+    rt = get_runtime()
+    iteration = int(state.get("reflection_iteration") or 0)
+    t0 = time.perf_counter()
+
+    if iteration >= 1:
+        base_sub_answers = state.get("base_sub_answers") or []
+        gap_sub_answers = state.get("sub_answers") or []
+        base_traces = state.get("base_traces") or []
+        gap_traces = state.get("traces") or []
+        base_chunks = state.get("base_all_chunks") or []
+        gap_chunks = state.get("all_chunks") or []
+        base_max = 0
+        for c in (state.get("base_citations") or []):
+            try:
+                base_max = max(base_max, int(c.get("num") or 0))
+            except Exception:
+                pass
+        for c in state.get("base_citation_map", {}).values():
+            try:
+                base_max = max(base_max, int(c))
+            except Exception:
+                pass
+
+        shifted_gap_answers = []
+        for sa in gap_sub_answers:
+            shifted = dict(sa)
+            shifted["answer"] = _shift_citation_numbers(str(shifted.get("answer") or ""), base_max)
+            shifted["citations"] = [_shift_citation(c, base_max) for c in (shifted.get("citations") or [])]
+            shifted_gap_answers.append(shifted)
+
+        merged_sub_answers = base_sub_answers + shifted_gap_answers
+        merged_citations = _merge_citations(state.get("base_citations") or [], [
+            _shift_citation(c, base_max) for c in (state.get("citations") or [])
+        ])
+
+        synthesis_tokens: list[str] = []
+        if len(merged_sub_answers) > 1:
+            await rt.emit("reflection_merge_start", {
+                "base_sub_answers": len(base_sub_answers),
+                "gap_sub_answers": len(gap_sub_answers),
+            })
+            async for token in synthesize_stream(
+                state.get("rewritten_query") or state["query"],
+                merged_sub_answers,
+                history=state.get("history") or [],
+                history_summary=state.get("history_summary") or "",
+            ):
+                synthesis_tokens.append(token)
+                await rt.emit("token", {"text": token})
+        final_answer = "".join(synthesis_tokens) or (merged_sub_answers[0].get("answer") if merged_sub_answers else state.get("final_answer", ""))
+        final_answer = _shift_citation_numbers(final_answer, 0)
+
+        ms = int((time.perf_counter() - t0) * 1000)
+        rt.record_stage("reflection_ms", ms)
+        await rt.emit("reflection_done", {
+            "triggered": True,
+            "iteration": iteration,
+            "gaps_found": bool(state.get("reflection_gaps")),
+            "gap_queries": state.get("reflection_gaps") or [],
+            "merged_sub_answers_count": len(merged_sub_answers),
+            "latency_ms": ms,
+        })
+        return {
+            "final_answer": final_answer,
+            "sub_answers": merged_sub_answers,
+            "traces": base_traces + gap_traces,
+            "citations": merged_citations,
+            "all_chunks": base_chunks + gap_chunks,
+            "reflection_triggered": True,
+            "reflection_iteration": 2,
+        }
+
+    should_reflect = (
+        len(state.get("sub_queries") or []) > 1
+        or (state.get("confidence") is not None and float(state.get("confidence") or 1.0) < 0.7)
+        or bool(state.get("reflection_enabled"))
+    )
+    if not should_reflect or not rt.workspace.get("chunks"):
+        await rt.emit("reflection_done", {
+            "triggered": False,
+            "reason": "not_applicable",
+            "iteration": iteration,
+        })
+        return {"reflection_iteration": 0, "reflection_triggered": False}
+
+    chunk_preview = "\n\n".join(
+        (getattr(c, "chunk_text", "") or "")[:500]
+        for c in (rt.workspace.get("chunks") or [])[:12]
+    )
+    prompt = (
+        f"Original question:\n{state['query']}\n\n"
+        f"Sub-queries answered:\n{json.dumps(state.get('sub_queries') or [], ensure_ascii=False)}\n\n"
+        f"Current answer:\n{state.get('final_answer') or ''}\n\n"
+        f"Available retrieved chunks preview:\n{chunk_preview}\n\n"
+        "Return JSON."
+    )
+
+    try:
+        raw = await _traced_reflect(prompt, _REFLECT_SYSTEM)
+        parsed = _extract_json_object(raw or "") or {}
+    except asyncio.TimeoutError:
+        ms = int((time.perf_counter() - t0) * 1000)
+        await rt.emit("reflection_done", {
+            "triggered": False,
+            "reason": "timeout",
+            "iteration": iteration,
+            "latency_ms": ms,
+        })
+        return {"reflection_triggered": False}
+    except Exception as exc:
+        ms = int((time.perf_counter() - t0) * 1000)
+        await rt.emit("reflection_done", {
+            "triggered": False,
+            "reason": "llm_error",
+            "error": str(exc),
+            "iteration": iteration,
+            "latency_ms": ms,
+        })
+        return {"reflection_triggered": False}
+
+    gap_queries_raw = parsed.get("gap_queries") or []
+    if not isinstance(gap_queries_raw, list):
+        gap_queries_raw = []
+    gap_queries = [str(q).strip() for q in gap_queries_raw if str(q).strip()][:2]
+    complete = bool(parsed.get("complete", not gap_queries))
+    ms = int((time.perf_counter() - t0) * 1000)
+
+    if complete or not gap_queries:
+        rt.record_stage("reflection_ms", ms)
+        await rt.emit("reflection_done", {
+            "triggered": False,
+            "reason": parsed.get("reason") or "complete",
+            "iteration": iteration,
+            "gaps_found": False,
+            "latency_ms": ms,
+        })
+        return {"reflection_iteration": 0, "reflection_triggered": False}
+
+    # Reconfigure cached-only pass: every gap query retrieves against the
+    # already fetched chunk set and the original URL universe. No web nodes run.
+    search_results = rt.workspace.get("search_results") or []
+    urls_payload = rt.workspace.get("urls") or []
+    rt.workspace["all_results_lists"] = [search_results for _ in gap_queries]
+    rt.workspace["per_subquery_urls"] = [urls_payload for _ in gap_queries]
+
+    await rt.emit("reflection_done", {
+        "triggered": True,
+        "reason": parsed.get("reason") or "gaps_found",
+        "iteration": iteration,
+        "gaps_found": True,
+        "gap_queries": gap_queries,
+        "latency_ms": ms,
+    })
+    return {
+        "reflection_iteration": 1,
+        "reflection_triggered": True,
+        "reflection_gaps": gap_queries,
+        "base_sub_answers": state.get("sub_answers") or [],
+        "base_traces": state.get("traces") or [],
+        "base_citation_map": {str(c.get("url")): int(c.get("num")) for c in (state.get("citations") or []) if c.get("url") and c.get("num")},
+        "base_citations": state.get("citations") or [],
+        "base_all_chunks": state.get("all_chunks") or [],
+        "sub_queries": gap_queries,
+    }
+
+
+def _shift_citation_numbers(text: str, offset: int) -> str:
+    if offset <= 0:
+        return text
+    return re.sub(r"\[(\d+)\]", lambda m: f"[{int(m.group(1)) + offset}]", text)
+
+
+def _shift_citation(citation: dict, offset: int) -> dict:
+    c = dict(citation)
+    try:
+        c["num"] = int(c.get("num") or 0) + offset
+    except Exception:
+        pass
+    return c
+
+
+def _merge_citations(base: list[dict], extra: list[dict]) -> list[dict]:
+    out: list[dict] = []
+    seen_nums: set[int] = set()
+    for citation in list(base or []) + list(extra or []):
+        try:
+            num = int(citation.get("num"))
+        except Exception:
+            continue
+        if num in seen_nums:
+            continue
+        seen_nums.add(num)
+        out.append(citation)
+    return sorted(out, key=lambda c: int(c.get("num") or 0))
 
 
 # ── Phase 3: fused retrieve+generate node ─────────────────────────────────────
@@ -1236,6 +1469,7 @@ async def node_retrieve_and_generate(state: GraphState, config: Any = None) -> d
         "urls": rt.workspace.get("urls") or [],
         "all_chunks": _all_chunks_flat,
         "traces": traces,
+        "sub_answers": sub_answers,
         "mode": "search",
     }
 
@@ -1473,6 +1707,14 @@ def _route_after_chunk(state: GraphState) -> str:
     return "emit_done" if state.get("error") else "retrieve"
 
 
+def _route_after_reflect(state: GraphState) -> str:
+    if int(state.get("reflection_iteration") or 0) == 1 and state.get("reflection_triggered"):
+        # First reflection pass found gaps and rewired sub_queries to cached-only
+        # gap queries. Loop back once to retrieve_and_generate over rt.workspace["chunks"].
+        return "retrieve_and_generate"
+    return "embedding_cleanup"
+
+
 # ── Build & compile ───────────────────────────────────────────────────────────
 
 _GRAPH = None
@@ -1497,6 +1739,7 @@ def build_pipeline_graph():
     # nodes so each sub-query's LLM generation starts the moment its OWN retrieve
     # completes, instead of waiting for all sub-queries' retrievals to finish.
     g.add_node("retrieve_and_generate", node_retrieve_and_generate)
+    g.add_node("reflect", node_reflect)
     g.add_node("embedding_cleanup", node_embedding_cleanup)
     g.add_node("cache_insert", node_cache_insert)
     g.add_node("emit_done", node_emit_done)
@@ -1521,7 +1764,10 @@ def build_pipeline_graph():
                             {"emit_done": "emit_done", "chunk_pages": "chunk_pages"})
     g.add_conditional_edges("chunk_pages", _route_after_chunk,
                             {"emit_done": "emit_done", "retrieve": "retrieve_and_generate"})
-    g.add_edge("retrieve_and_generate", "embedding_cleanup")
+    g.add_edge("retrieve_and_generate", "reflect")
+    g.add_conditional_edges("reflect", _route_after_reflect,
+                            {"retrieve_and_generate": "retrieve_and_generate",
+                             "embedding_cleanup": "embedding_cleanup"})
     g.add_edge("embedding_cleanup", "cache_insert")
 
     g.add_edge("parametric_answer", "emit_done")
@@ -1546,6 +1792,7 @@ async def run_pipeline(
     max_results: int = 6,
     top_k: int = 8,
     cache_enabled: Optional[bool] = None,
+    reflection_enabled: bool = False,
 ) -> AsyncIterator[tuple[str, dict]]:
     """Run the graph and yield SSE-shaped (event_name, data) tuples as they're produced."""
     graph = build_pipeline_graph()
@@ -1573,6 +1820,7 @@ async def run_pipeline(
         "max_results": max_results,
         "top_k": top_k,
         "cache_enabled": cache_enabled,
+        "reflection_enabled": reflection_enabled,
     }
 
     async def _runner() -> None:
