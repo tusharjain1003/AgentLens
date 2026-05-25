@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     semantic_cache_sim_threshold: float = 0.92
     semantic_cache_ttl_hours: int = 2
     semantic_cache_lookup_timeout_ms: int = 1500
+    quality_mode_default: bool = False
 
     # Conversation history bounds (Phase A4)
     history_max_turns: int = 4

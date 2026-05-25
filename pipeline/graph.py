@@ -178,6 +178,7 @@ class GraphState(TypedDict, total=False):
     top_k: int
     cache_enabled: Optional[bool]   # None → fall back to settings.semantic_cache_enabled
     reflection_enabled: bool
+    quality_mode: Optional[bool]
     # Analyze outputs
     mode: Literal["parametric", "search", "cache", "unsupported"]
     rewritten_query: str
@@ -214,6 +215,7 @@ class GraphState(TypedDict, total=False):
     base_citation_map: dict
     base_citations: list
     base_all_chunks: list
+    verification: dict
     latency_breakdown: dict
     followups: list
     error: Optional[str]
@@ -1168,6 +1170,112 @@ def _merge_citations(base: list[dict], extra: list[dict]) -> list[dict]:
     return sorted(out, key=lambda c: int(c.get("num") or 0))
 
 
+# ── Node: verify (claim support flagging + optional quality regeneration) ─────
+
+_VERIFY_REGEN_SYSTEM = """\
+You are a grounded-answer repair step. Rewrite the answer using only supported
+claims. Drop or qualify unsupported claims. Preserve valid [N] citations.
+Return only the corrected answer text.
+"""
+
+
+async def node_verify(state: GraphState, config: Any = None) -> dict:
+    rt = get_runtime()
+    if state.get("mode") in ("parametric", "cache", "unsupported"):
+        return {}
+
+    t0 = time.perf_counter()
+    answer = state.get("final_answer") or ""
+    claims = _extract_claims(answer)[:8]
+    chunk_text = " ".join(
+        str(c.get("chunk_text") or "")
+        for c in (state.get("all_chunks") or [])
+        if isinstance(c, dict)
+    ).lower()
+
+    supported_claims: list[str] = []
+    unsupported_claims: list[str] = []
+    for claim in claims:
+        if _claim_supported(claim, chunk_text):
+            supported_claims.append(claim)
+        else:
+            unsupported_claims.append(claim)
+
+    quality_mode = state.get("quality_mode")
+    if quality_mode is None:
+        quality_mode = settings.quality_mode_default
+
+    verification = {
+        "total_claims": len(claims),
+        "supported": len(supported_claims),
+        "unsupported": len(unsupported_claims),
+        "unsupported_claims": unsupported_claims,
+        "mode": "regenerate" if quality_mode else "flag",
+    }
+
+    regenerated = False
+    if quality_mode and unsupported_claims:
+        prompt = (
+            f"Original question:\n{state['query']}\n\n"
+            f"Current answer:\n{answer}\n\n"
+            f"Unsupported claims:\n{json.dumps(unsupported_claims, ensure_ascii=False)}\n\n"
+            f"Available source excerpts:\n{chunk_text[:12000]}\n\n"
+            "Rewrite the answer."
+        )
+        try:
+            llm = get_llm()
+            repaired = await llm.acomplete(prompt, system=_VERIFY_REGEN_SYSTEM, max_tokens=1200)
+            if repaired and repaired.strip():
+                answer = repaired.strip()
+                regenerated = True
+        except Exception as exc:
+            verification["regeneration_failed"] = True
+            verification["regeneration_error"] = str(exc)
+
+    ms = int((time.perf_counter() - t0) * 1000)
+    rt.record_stage("verify_ms", ms)
+    verification["latency_ms"] = ms
+    verification["regenerated"] = regenerated
+    await rt.emit("verify_done", verification)
+
+    out = {"verification": verification}
+    if regenerated:
+        out["final_answer"] = answer
+    return out
+
+
+_CLAIM_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+_CLAIM_WORD_RE = re.compile(r"\b[a-zA-Z][a-zA-Z0-9-]{3,}\b")
+
+
+def _extract_claims(answer: str) -> list[str]:
+    text = re.sub(r"\s+", " ", answer or "").strip()
+    if not text:
+        return []
+    claims = []
+    for part in _CLAIM_SPLIT_RE.split(text):
+        claim = part.strip()
+        if len(claim) < 30:
+            continue
+        if claim.startswith(("#", "-", "*")):
+            claim = claim.lstrip("#-* ").strip()
+        if claim:
+            claims.append(claim)
+    return claims
+
+
+def _claim_supported(claim: str, chunk_text: str) -> bool:
+    words = [
+        w.lower()
+        for w in _CLAIM_WORD_RE.findall(re.sub(r"\[\d+\]", "", claim))
+        if w.lower() not in {"that", "this", "with", "from", "were", "have", "which", "their", "about"}
+    ]
+    if not words:
+        return True
+    hits = sum(1 for w in set(words) if w in chunk_text)
+    return hits / max(1, len(set(words))) >= 0.45
+
+
 # ── Phase 3: fused retrieve+generate node ─────────────────────────────────────
 
 async def node_retrieve_and_generate(state: GraphState, config: Any = None) -> dict:
@@ -1622,6 +1730,7 @@ async def node_emit_done(state: GraphState, config: Any = None) -> dict:
         "sub_queries_count": len(state.get("sub_queries") or []),
         "mode": state.get("mode") or "search",
         "token_cost": rt.token_tracker.snapshot(),
+        "verification": state.get("verification") or {},
     }
 
     await rt.emit("done", {
@@ -1631,6 +1740,7 @@ async def node_emit_done(state: GraphState, config: Any = None) -> dict:
         "latency_breakdown": latency_breakdown,
         "followups":         followups,
         "mode":              state.get("mode") or "search",
+        "verification":      state.get("verification") or {},
     })
 
     # Persist (fire-and-forget) — preserves existing session history behavior.
@@ -1712,7 +1822,7 @@ def _route_after_reflect(state: GraphState) -> str:
         # First reflection pass found gaps and rewired sub_queries to cached-only
         # gap queries. Loop back once to retrieve_and_generate over rt.workspace["chunks"].
         return "retrieve_and_generate"
-    return "embedding_cleanup"
+    return "verify"
 
 
 # ── Build & compile ───────────────────────────────────────────────────────────
@@ -1740,6 +1850,7 @@ def build_pipeline_graph():
     # completes, instead of waiting for all sub-queries' retrievals to finish.
     g.add_node("retrieve_and_generate", node_retrieve_and_generate)
     g.add_node("reflect", node_reflect)
+    g.add_node("verify", node_verify)
     g.add_node("embedding_cleanup", node_embedding_cleanup)
     g.add_node("cache_insert", node_cache_insert)
     g.add_node("emit_done", node_emit_done)
@@ -1767,7 +1878,8 @@ def build_pipeline_graph():
     g.add_edge("retrieve_and_generate", "reflect")
     g.add_conditional_edges("reflect", _route_after_reflect,
                             {"retrieve_and_generate": "retrieve_and_generate",
-                             "embedding_cleanup": "embedding_cleanup"})
+                             "verify": "verify"})
+    g.add_edge("verify", "embedding_cleanup")
     g.add_edge("embedding_cleanup", "cache_insert")
 
     g.add_edge("parametric_answer", "emit_done")
@@ -1793,6 +1905,7 @@ async def run_pipeline(
     top_k: int = 8,
     cache_enabled: Optional[bool] = None,
     reflection_enabled: bool = False,
+    quality_mode: Optional[bool] = None,
 ) -> AsyncIterator[tuple[str, dict]]:
     """Run the graph and yield SSE-shaped (event_name, data) tuples as they're produced."""
     graph = build_pipeline_graph()
@@ -1821,6 +1934,7 @@ async def run_pipeline(
         "top_k": top_k,
         "cache_enabled": cache_enabled,
         "reflection_enabled": reflection_enabled,
+        "quality_mode": quality_mode,
     }
 
     async def _runner() -> None:

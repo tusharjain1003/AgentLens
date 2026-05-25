@@ -173,6 +173,7 @@ class SearchRequest(BaseModel):
     max_results: int = 6
     top_k: int = 8
     reflection_enabled: bool = False
+    quality_mode: Optional[bool] = None
 
 
 # ── SSE helpers ────────────────────────────────────────────────────────────────
@@ -260,6 +261,7 @@ async def _pipeline_stream(
                     top_k=req.top_k,
                     cache_enabled=cache_override,
                     reflection_enabled=req.reflection_enabled,
+                    quality_mode=req.quality_mode,
                 ):
                     await handle.broadcast(event_name, data)
         except Exception as exc:
