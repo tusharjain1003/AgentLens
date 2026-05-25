@@ -1127,7 +1127,6 @@ async def node_reflect(state: GraphState, config: Any = None) -> dict:
                 synthesis_tokens.append(token)
                 await rt.emit("token", {"text": token})
         final_answer = "".join(synthesis_tokens) or (merged_sub_answers[0].get("answer") if merged_sub_answers else state.get("final_answer", ""))
-        final_answer = _shift_citation_numbers(final_answer, 0)
 
         ms = int((time.perf_counter() - t0) * 1000)
         rt.record_stage("reflection_ms", ms)
@@ -1956,7 +1955,7 @@ def _route_after_extract(state: GraphState) -> str:
 
 
 def _route_after_chunk(state: GraphState) -> str:
-    return "emit_done" if state.get("error") else "retrieve"
+    return "emit_done" if state.get("error") else "retrieve_and_generate"
 
 
 def _route_after_reflect(state: GraphState) -> str:
@@ -2016,7 +2015,7 @@ def build_pipeline_graph():
     g.add_conditional_edges("extract_pages", _route_after_extract,
                             {"emit_done": "emit_done", "chunk_pages": "chunk_pages"})
     g.add_conditional_edges("chunk_pages", _route_after_chunk,
-                            {"emit_done": "emit_done", "retrieve": "retrieve_and_generate"})
+                            {"emit_done": "emit_done", "retrieve_and_generate": "retrieve_and_generate"})
     g.add_edge("retrieve_and_generate", "reflect")
     g.add_conditional_edges("reflect", _route_after_reflect,
                             {"retrieve_and_generate": "retrieve_and_generate",

@@ -4,9 +4,9 @@ import { motion } from "framer-motion";
 import { X } from "lucide-react";
 import Logo from "./Logo";
 
-const WEBLENS_URL = "https://github.com/swapnil18800/weblens";
-const LINKEDIN_URL = "https://www.linkedin.com/in/swapnil18800/";
-const AUTHOR_NAME = "Swapnil Padhi";
+const WEBLENS_URL = "https://github.com/tusharjain1003/AgentLens";
+const LINKEDIN_URL = "https://www.linkedin.com/in/tusharjain1003/";
+const AUTHOR_NAME = "Tushar Jain";
 
 interface Props {
   onClose: () => void;

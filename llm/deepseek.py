@@ -68,6 +68,7 @@ class DeepSeekClient(BaseLLMClient):
             messages=messages,
             max_tokens=max_tokens,
             stream=True,
+            stream_options={"include_usage": True},
         )
         collected: list[str] = []
         usage = None

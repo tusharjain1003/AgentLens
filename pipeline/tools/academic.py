@@ -31,8 +31,9 @@ async def search_arxiv(query: str, max_results: int = 5, timeout_s: float = 8.0)
     async with httpx.AsyncClient(timeout=timeout_s) as client:
         resp = await client.get(f"{ARXIV_API_URL}?{params}")
         resp.raise_for_status()
+        body = resp.text
 
-    root = ET.fromstring(resp.text)
+    root = ET.fromstring(body)
     ns = {"atom": "http://www.w3.org/2005/Atom"}
     results: list[AcademicResult] = []
     for entry in root.findall("atom:entry", ns):
