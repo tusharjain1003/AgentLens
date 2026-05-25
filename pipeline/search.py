@@ -5,6 +5,7 @@ Tavily is used ONLY as a search index — we extract titles and URLs and
 nothing else. The actual page content is fetched separately via Jina Reader,
 which gives full markdown instead of sparse 200-char snippets.
 """
+from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass

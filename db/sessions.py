@@ -2,6 +2,7 @@
 Session persistence — rag_sessions + rag_session_messages.
 All public functions are fire-and-forget safe (log on failure, never raise).
 """
+from __future__ import annotations
 import json
 import logging
 from typing import List, Optional

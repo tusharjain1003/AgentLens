@@ -118,7 +118,7 @@ def _preload_models() -> None:
 
 # ── App ────────────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="WebLens", version="3.0.0", lifespan=lifespan)
+app = FastAPI(title="AgentLens", version="3.0.0", lifespan=lifespan)
 
 # ── Auth + Rate Limiting (Phase 3.11) ───────────────────────────────────────
 

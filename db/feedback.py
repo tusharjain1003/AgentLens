@@ -3,6 +3,7 @@ Human feedback persistence for rag_feedback table.
 
 Stores ratings, corrections, and citation-level feedback per message.
 """
+from __future__ import annotations
 import logging
 
 import db.client as db
