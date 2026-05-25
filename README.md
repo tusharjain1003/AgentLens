@@ -1,6 +1,6 @@
 # AgentLens
 
-> A production-grade agentic web research RAG system — retrieves full-page content, runs hybrid semantic search, reflects on coverage gaps, verifies claims against sources, and streams grounded answers with citations in real time.
+> A production-grade agentic web research RAG system — retrieves full-page content, runs hybrid semantic search, reflects on coverage gaps, checks claims for source support, and streams grounded answers with citations in real time.
 
 [![Python](https://img.shields.io/badge/Python-3.11+-blue)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-green)](https://fastapi.tiangolo.com)
@@ -81,7 +81,7 @@ The pipeline is a [LangGraph StateGraph](https://langchain-ai.github.io/langgrap
 ### 7. Reflection (`graph.py`, `node_reflect`)
 - Post-retrieval coverage check: LLM evaluates sub-answers for gaps
 - On gap detection: re-decomposes into gap queries, retrieves from existing cache, generates and merges augmented sub-answers
-- Tracks iteration count; max 2 rounds to bound latency
+- Tracks iteration count; capped at 1 iteration (max 2 passes through the reflection node) to bound latency
 - SSE: `reflection_done` with gap metadata
 
 ### 8. Generate (`generate.py`)
@@ -96,9 +96,9 @@ The pipeline is a [LangGraph StateGraph](https://langchain-ai.github.io/langgrap
 - SSE: `synthesis_start` → `token*` → `synthesis_done`
 
 ### 10. Verify (`graph.py`, `node_verify`)
-- Claim-level verification against source chunks
+- Lightweight claim support check against source chunks
 - Two modes:
-  - **Flag mode**: identifies unsupported claims inline (fast, non-blocking)
+  - **Flag mode**: flags unsupported claims inline (fast, non-blocking)
   - **Quality mode**: re-generates the answer with unsupported claims removed or corrected
 - SSE: `verify_done`
 
@@ -117,7 +117,7 @@ The pipeline is a [LangGraph StateGraph](https://langchain-ai.github.io/langgrap
 |---------|-------------|
 | **Adaptive Tool Routing** | LLM selects tools (web search, calculator, academic search) with logged rationale and confidence score |
 | **Reflection Loop** | Post-retrieval coverage check identifies answer gaps, re-decomposes into gap queries, retrieves from cached content, and merges augmented sub-answers |
-| **Claim Verification** | Post-hoc hallucination check: extracts claims from answer, verifies each against source chunks (flag or regenerate mode) |
+| **Claim Support Check** | Post-hoc hallucination guard: extracts claims from answer, checks each against source chunks via word-overlap heuristic (flag or regenerate mode) |
 | **Parametric Routing** | Arithmetic, geography, and textbook-stable facts bypass search entirely (~2-5s vs 25-60s) |
 | **Unsupported Handling** | PDFs, diagrams, images, code execution → polite decline that redirects to what AgentLens *can* do |
 
@@ -175,7 +175,7 @@ LangSmith tracing is built into every LangGraph node — each emits a typed span
 | `retrieve` | `retriever` | `bm25_hits`, `dense_hits`, `rerank_scores`, `tier_distribution` |
 | `generate` | `llm` | `chunks_available`, `citations_used`, `utilization_ratio` |
 | `reflect` | `chain` | `gaps_found`, `gap_queries`, `iteration`, `action` |
-| `verify` | `chain` | `total_claims`, `supported`, `unsupported`, `mode` |
+| `verify` | `chain` | `total_claims`, `supported`, `unsupported`, `mode` (lightweight word-overlap check) |
 
 Tracing is off by default to keep costs predictable. Enable per-request:
 
@@ -298,7 +298,7 @@ Streaming RAG pipeline via SSE.
 | `sub_answer_done` | latency, utilization_ratio, validation | — |
 | `reflection_start/done` | gap analysis, iteration count | — |
 | `synthesis_start/token/done` | final merged answer (multi-SQ only) | — |
-| `verify_done` | claim verification results | — |
+| `verify_done` | claim support check results | — |
 | `done` | session_id, message_id, citations, latency_breakdown, followups | final |
 | `error` | message, reason, failures[] | on failure |
 
@@ -328,7 +328,7 @@ GET    /api/health                    Environment info, version, LLM provider
 
 AgentLens ships with a production-grade automated evaluation harness: 52 questions across 11 adversarial categories, 5 core metrics judged by LLM-as-judge, with auto-classified failure analysis.
 
-### Latest Results (v12 — 52-question full run)
+### Latest Results (v12 — 52-question benchmark)
 
 | Metric | Score | Verdict |
 |--------|-------|---------|
@@ -339,7 +339,7 @@ AgentLens ships with a production-grade automated evaluation harness: 52 questio
 | Context Precision | 0.654 | Improving |
 | Faithfulness | 0.649 | Action item |
 
-**15 pass · 15 partial · 0 fail** of 30 questions (52-question map, 30 in primary eval)
+**15 pass · 15 partial · 0 fail** of 30 questions (52-question benchmark, 30 in primary eval metric set)
 
 ### Version-over-Version Progress
 
@@ -350,7 +350,7 @@ AgentLens ships with a production-grade automated evaluation harness: 52 questio
 | v7 | 30 | 0.718 | 9 | 5-metric harness, 10-domain mix |
 | v8 | 30 | 0.732 | 12 | LangSmith spans, cache fixes |
 | v9 | 30 | 0.789 | 15 | Node restructure, chunking quality |
-| v12 | 52 | — | — | Reflection, verification, routing improvements |
+| v12 | 52 | 0.789 | 15 | Reflection, claim check, routing improvements |
 
 ### Per-Category Breakdown
 
@@ -505,7 +505,7 @@ See [DEPLOYMENT.md](docs/DEPLOYMENT.md) for detailed Railway, Heroku, and AWS in
 
 **Why the reflection loop is capped at 1 iteration.** Each reflection pass calls the LLM to detect gaps, re-decomposes if needed, retrieves from the *already-cached* chunk pool (never re-fetches from the web), and merges augmented sub-answers. A second pass would retrieve from the same cache — diminishing returns for 2-3s of additional latency. The cap bounds worst-case latency to ~65s instead of unbounded growth.
 
-**Why the claim verifier runs post-streaming.** The verifier reads the complete answer text and compares each claim against source chunks. Running it before streaming would block the user from seeing any answer for an additional 3-5s. Running it after `done` means the user sees the answer immediately; if the verifier finds unsupported claims, it flags them inline or regenerates (quality mode) before the next turn.
+**Why the claim support check runs post-streaming.** The checker reads the complete answer text and compares each claim against source chunks via word-overlap. Running it before streaming would block the user from seeing any answer for an additional 3-5s. Running it after `done` means the user sees the answer immediately; if it finds unsupported claims, it flags them inline or regenerates (quality mode) before the next turn.
 
 ### Technology Choices
 

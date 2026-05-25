@@ -1272,7 +1272,11 @@ def _merge_citations(base: list[dict], extra: list[dict]) -> list[dict]:
     return sorted(out, key=lambda c: int(c.get("num") or 0))
 
 
-# ── Node: verify (claim support flagging + optional quality regeneration) ─────
+# ── Node: verify (lightweight claim support check + optional quality regeneration) ─────
+# NOTE: This is a lightweight word-overlap heuristic, NOT a robust NLI-based
+# verifier. It extracts sentences as claims and checks word overlap against
+# source chunks with a 45% threshold. Useful as a first-pass hallucination
+# guard but should not be described as "claim verification."
 
 _VERIFY_REGEN_SYSTEM = """\
 You are a grounded-answer repair step. Rewrite the answer using only supported
