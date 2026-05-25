@@ -1,0 +1,10 @@
+[build]
+builder = "nixpacks"
+
+[deploy]
+healthcheck.path = "/api/health"
+healthcheck.interval = 30
+
+[env]
+ENVIRONMENT = "production"
+LOG_LEVEL = "INFO"
