@@ -29,3 +29,7 @@ trafilatura==1.12.2
 # LangGraph pipeline orchestration + LangSmith tracing
 langgraph==1.1.9
 langsmith==0.8.3
+
+# Tests
+pytest==8.3.4
+ruff==0.8.4

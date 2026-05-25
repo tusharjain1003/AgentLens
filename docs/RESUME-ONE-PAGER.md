@@ -2,7 +2,7 @@
 
 > **Project:** WebLens — Production-Grade Web Search RAG System  
 > **Stack:** FastAPI · LangGraph · React 18 + Vite · Supabase (PostgreSQL + pgvector) · DeepSeek V3 · sentence-transformers · LangSmith · Railway  
-> **Link:** [github.com/swapnil18800/weblens](https://github.com/swapnil18800/weblens)
+> **Link:** [github.com/tusharjain1003/AgentLens](https://github.com/tusharjain1003/AgentLens)
 
 ---
 
@@ -14,7 +14,7 @@ End-to-end Retrieval-Augmented Generation system that answers natural-language q
 
 ## Core Architecture Bullets (Pick 4–6 for Resume)
 
-- Designed and built a **13-node LangGraph orchestration pipeline** (query rewrite → route classification → semantic cache → URL discovery → extraction → chunking → retrieval → cross-encoder rerank → streaming generation → synthesis → cache insert), replacing a monolithic 500-line async coroutine with independently traceable, error-isolated nodes; each search-path node carries an error short-circuit edge to `emit_done`, so any single stage failure emits a structured error SSE event rather than crashing the coroutine.
+- Designed and built a **12-node LangGraph orchestration pipeline** (query rewrite → route classification → semantic cache → URL discovery → extraction → chunking → fused retrieval/generation → synthesis → cache insert), replacing a monolithic 500-line async coroutine with independently traceable, error-isolated nodes; each search-path node carries an error short-circuit edge to `emit_done`, so any single stage failure emits a structured error SSE event rather than crashing the coroutine.
 - Implemented **hybrid retrieval** combining BM25 (rank-bm25, in-process) and dense vector search (all-MiniLM-L6-v2, 384-dim, L2-normalized, pgvector IVFFlat), fused via Reciprocal Rank Fusion (k=60), then reranked by ms-marco-TinyBERT cross-encoder over the top-16 candidates — achieving +20.7% context precision and +7.6% context recall vs. dense-only baseline on the 30-question benchmark.
 - Built a **full-page extraction pipeline** (Jina Reader → trafilatura fallback → Unicode NFKC normalization → boilerplate stripping) to replace search-snippet RAG, yielding complete heading-preserved markdown chunked with semantic boundary awareness (1500-char max, 200-char overlap, 8-word minimum, >40% link-density garbage filter); extraction runs **once on the global deduplicated URL union** — not per sub-query — eliminating redundant HTTP fetches for shared URLs across multiple sub-questions.
 - Engineered a **semantic query cache** using pgvector ANN cosine (threshold 0.92, TTL 2h, 1500ms hard timeout) that short-circuits the full pipeline in 3–5s vs. 20–60s for paraphrase hits; validated cache correctness with a 3-bug root cause analysis (gate placement, timeout misconfiguration, per-request header isolation) that lifted paraphrase recall from 0.500 → 0.750 across consecutive benchmark runs.
@@ -73,7 +73,7 @@ End-to-end Retrieval-Augmented Generation system that answers natural-language q
 
 | Decision | Chosen | Alternative Considered | Tradeoff |
 |---|---|---|---|
-| Orchestration | LangGraph 13-node graph | Monolithic async coroutine | LangSmith spans + conditional routing; slight startup overhead |
+| Orchestration | LangGraph 12-node graph | Monolithic async coroutine | LangSmith spans + conditional routing; slight startup overhead |
 | Sparse retrieval | BM25Okapi in-process | Elasticsearch, OpenSearch | Zero infra cost; sufficient at <500 chunk working set per query |
 | Reranker | TinyBERT cross-encoder | MonoT5, full BERT | 4× faster than full BERT, ~2% quality gap; runs on CPU |
 | Embedding model | MiniLM 384-dim | MPNet 768-dim, ada-002 | 2–3× faster encode; avoids per-embedding API cost |
@@ -88,7 +88,7 @@ End-to-end Retrieval-Augmented Generation system that answers natural-language q
 
 ## Interview Talking Points (30-Second Version)
 
-> "WebLens retrieves and answers questions from the live web. The core insight is that search snippets (120 chars) lose critical context — instead, I extract full-page markdown, chunk it along heading boundaries, and run hybrid BM25 + dense retrieval fused with RRF, then cross-encoder reranked. The pipeline is a 13-node LangGraph graph; each node emits SSE events so the user sees the pipeline trace live. I built an eval harness that scores 5 RAG metrics against 30 adversarial questions and used it to iterate from a 0.718 to 0.789 aggregate score across 3 versioned releases — with latency dropping 13% at the same time."
+> "WebLens retrieves and answers questions from the live web. The core insight is that search snippets (120 chars) lose critical context — instead, I extract full-page markdown, chunk it along heading boundaries, and run hybrid BM25 + dense retrieval fused with RRF, then cross-encoder reranked. The pipeline is a 12-node LangGraph graph; each node emits SSE events so the user sees the pipeline trace live. I built an eval harness that scores 5 RAG metrics against 30 adversarial questions and used it to iterate from a 0.718 to 0.789 aggregate score across 3 versioned releases — with latency dropping 13% at the same time."
 
 ---
 
@@ -96,7 +96,7 @@ End-to-end Retrieval-Augmented Generation system that answers natural-language q
 
 | Layer | Technology |
 |---|---|
-| Orchestration | LangGraph StateGraph (13 nodes), asyncio |
+| Orchestration | LangGraph StateGraph (12 nodes), asyncio |
 | Backend | FastAPI + Uvicorn, Server-Sent Events |
 | LLM | DeepSeek V3 (primary), OpenAI GPT-4o (fallback) |
 | Embeddings | all-MiniLM-L6-v2, 384-dim, sentence-transformers |

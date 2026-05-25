@@ -35,7 +35,7 @@ See the full detailed architecture with all layers and interactions in [ARCHITEC
 | Layer | Technology |
 |---|---|
 | **Backend** | FastAPI, Uvicorn, asyncio |
-| **Orchestration** | LangGraph StateGraph (13 nodes, conditional routing) |
+| **Orchestration** | LangGraph StateGraph (12 nodes, conditional routing) |
 | **Database** | Supabase — PostgreSQL + pgvector |
 | **Search** | Tavily API (URL discovery, parallel per sub-query) |
 | **Extraction** | Jina Reader (primary), trafilatura (fallback) |
@@ -229,8 +229,8 @@ xychart-beta
 ### Environment Setup
 
 ```bash
-git clone https://github.com/swapnil18800/weblens.git
-cd weblens
+git clone https://github.com/tusharjain1003/AgentLens.git
+cd AgentLens
 ```
 
 Create a `.env` file:
@@ -253,6 +253,28 @@ PORT=8000
 SEMANTIC_CACHE_ENABLED=false
 PUBLIC_MODE=false
 ```
+
+### Docker Compose
+
+For one-command local development with Postgres + pgvector:
+
+```bash
+docker compose up --build
+```
+
+Then initialize the local database once:
+
+```bash
+docker compose exec backend python db/setup.py
+```
+
+| Service | URL |
+|---|---|
+| Backend API | `http://localhost:8765` |
+| Frontend SPA | `http://localhost:5174` |
+| Postgres/pgvector | `localhost:5432` |
+
+The compose backend reads API keys from your shell or `.env`; the local database URL is injected automatically as `postgresql://weblens:weblens@db:5432/weblens`.
 
 ### Backend
 
@@ -408,7 +430,7 @@ web-search-rag/
 ├── requirements.txt
 │
 ├── pipeline/                 RAG pipeline — one file per stage
-│   ├── graph.py              LangGraph StateGraph: 13 nodes, conditional routing
+│   ├── graph.py              LangGraph StateGraph: 12 nodes, conditional routing
 │   ├── runtime.py            RuntimeContext (SSE queue, timing) via contextvars
 │   ├── analyze.py            Rewrite + route classify + decompose (LLM)
 │   ├── query_cache.py        Semantic cache: pgvector ANN over MiniLM embeddings
@@ -416,8 +438,8 @@ web-search-rag/
 │   ├── extract.py            Stage 2: Jina Reader + trafilatura + page_cache + normalize
 │   ├── chunk.py              Stage 3: Heading-aware chunker + garbage filter
 │   ├── embed.py              Stage 4: MiniLM batch encode (asyncio executor)
-│   ├── retrieve.py           Stages 5–6: BM25 + dense → RRF → TinyBERT cross-encoder
-│   ├── generate.py           Stages 7–8: Streaming generation + synthesis
+│   ├── retrieve.py           Stage 5: BM25 + dense → RRF → TinyBERT cross-encoder
+│   ├── generate.py           Stage 6: Streaming generation + synthesis
 │   ├── followups.py          Post-answer follow-up suggestions
 │   └── title.py              Background session title upgrade
 │

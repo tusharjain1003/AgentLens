@@ -21,7 +21,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
-from pipeline.token_tracker import TokenTracker, get_tracker
+from pipeline.token_tracker import TokenTracker
 
 
 _SENTINEL = ("__done__", None)
@@ -34,7 +34,7 @@ class RuntimeContext:
     `event_queue` is drained by the HTTP handler; nodes push (event, data).
     """
     event_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
-    token_tracker: TokenTracker = field(default_factory=get_tracker)
+    token_tracker: TokenTracker = field(default_factory=TokenTracker)
     t_start: float = field(default_factory=time.perf_counter)
     latency_breakdown: dict = field(default_factory=dict)
     langsmith_run_id: Optional[str] = None

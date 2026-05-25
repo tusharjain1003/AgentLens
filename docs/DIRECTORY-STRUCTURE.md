@@ -1,6 +1,6 @@
 # Directory Structure — WebLens
 
-> Current as of v9 (2026-05-11). For architectural context see [ARCHITECTURE.md](./ARCHITECTURE.md). For version-by-version change history see the `implementation-summary-v*.md` series.
+> Current as of v12 (2026-05-11). For architectural context see [ARCHITECTURE.md](./ARCHITECTURE.md). For version-by-version change history see the `implementation-summary-v*.md` series.
 
 ---
 
@@ -19,7 +19,7 @@ web-search-rag/
 ├── .env.example                    ← Reference env var template
 │
 ├── pipeline/                       ← RAG pipeline (one file per stage + orchestration)
-│   ├── graph.py                    ← LangGraph StateGraph: 13 nodes, conditional routing
+│   ├── graph.py                    ← LangGraph StateGraph: 12 nodes, conditional routing
 │   ├── runtime.py                  ← RuntimeContext (SSE queue, token tracker, timing) via contextvars
 │   ├── token_tracker.py            ← Thread-safe LLM cost/token accumulator
 │   ├── analyze.py                  ← Rewrite + route classify + decompose (LLM)
@@ -28,8 +28,8 @@ web-search-rag/
 │   ├── extract.py                  ← Stage 2: Jina Reader + trafilatura + page_cache I/O + normalization
 │   ├── chunk.py                    ← Stage 3: Heading-aware markdown chunker + garbage filter
 │   ├── embed.py                    ← Stage 4: MiniLM batch encode (asyncio executor)
-│   ├── retrieve.py                 ← Stages 5–6: BM25 + dense → RRF → TinyBERT cross-encoder
-│   ├── generate.py                 ← Stages 7–8: streaming generation + synthesis + history injection
+│   ├── retrieve.py                 ← Stage 5: BM25 + dense → RRF → TinyBERT cross-encoder
+│   ├── generate.py                 ← Stage 6: streaming generation + synthesis + history injection
 │   ├── followups.py                ← Post-answer: 3 suggested follow-up questions (LLM)
 │   └── title.py                    ← Background: LLM-upgrade the session title
 │
@@ -120,7 +120,7 @@ Each file is one stage or one orchestration concern. The boundary rule: pipeline
 
 | File | Responsibility | Why separate |
 |---|---|---|
-| `graph.py` | LangGraph `StateGraph` definition; all 13 nodes; conditional routing edges; `@traceable` wrappers | Orchestration logic isolated from business logic; enables LangSmith observability without modifying stage files |
+| `graph.py` | LangGraph `StateGraph` definition; all 12 nodes; conditional routing edges; `@traceable` wrappers | Orchestration logic isolated from business logic; enables LangSmith observability without modifying stage files |
 | `runtime.py` | `RuntimeContext` dataclass (SSE queue, token tracker, timing) accessed via `contextvars.ContextVar` | Keeps `GraphState` serializable; async context propagates automatically within `ainvoke` |
 | `token_tracker.py` | Thread-safe LLM token/cost accumulator | Separate concern; used by graph, available for future cost dashboards |
 | `analyze.py` | Query rewrite (history-aware) + route classification + decompose, all in one LLM call | Pre-pipeline decision; clean separation from search stages |

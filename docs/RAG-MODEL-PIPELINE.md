@@ -1,12 +1,12 @@
 # RAG Pipeline — WebLens
 
-> Current as of v9 (2026-05-11). This document is a deep-dive into the retrieval and generation lifecycle. For the system architecture and LangGraph orchestration see [ARCHITECTURE.md](./ARCHITECTURE.md). For evaluation results see [evaluation-results-summary.md](./evaluation-results-summary.md).
+> Current as of v12 (2026-05-11). This document is a deep-dive into the retrieval and generation lifecycle. For the system architecture and LangGraph orchestration see [ARCHITECTURE.md](./ARCHITECTURE.md). For evaluation results see [evaluation-results-summary.md](./evaluation-results-summary.md).
 
 ---
 
 ## Pipeline Overview
 
-WebLens runs a multi-stage pipeline for every search query. In v7+, this pipeline is driven by a **LangGraph `StateGraph`** with 13 nodes and 3 conditional routing decisions that happen before the linear retrieval stages:
+WebLens runs a multi-stage pipeline for every search query. In v12, this pipeline is driven by a **LangGraph `StateGraph`** with 12 nodes and 3 conditional routing decisions that happen before the retrieval/generation stages:
 
 ```
 User Query
@@ -40,10 +40,9 @@ User Query
          [chunk_pages] → heading-aware + garbage filter         │
                 │                                               │
                 ▼                                               │
-         [retrieve] → BM25 + dense + RRF + TinyBERT             │
-                │                                               │
-                ▼                                               │
-         [generate_answers] → concurrent streaming per SQ       │
+         [retrieve_and_generate] → BM25 + dense + RRF +         │
+                │                  TinyBERT, then concurrent    │
+                ▼                  streaming per SQ             │
                 │                                               │
                 ▼                                               │
          [embedding_cleanup]                                    │
@@ -76,7 +75,7 @@ User Query
 
 ---
 
-### Stage 0B — Analyze (Route + Decompose) (`pipeline/analyze.py`: `analyze_query`)
+### Stage 0B — Analyze (Route + Decompose) (`pipeline/analyze.py`: `route_and_decompose`)
 
 **What it does:** A single LLM call returns `{mode: parametric|search, sub_queries: [...], rationale}`.
 
@@ -91,7 +90,7 @@ The prompt is biased aggressively toward `search` — the parametric few-shots a
 
 **Decomposition:** for `search` queries, the LLM generates the minimum set of sub-queries that together cover the original question. The prompt's **Temporal Reasoning** section anchors all date inferences to `{today}` (injected at runtime) rather than training-data defaults.
 
-**Decomposition quality is the primary driver of multi-hop answer quality.** The key failure mode is `under_decomposition` — treating "Compare Real Madrid and Manchester City CL performance over 3 seasons" as a single query instead of decomposing by club and season. The v9 13-node split and `rewrite_query` improvements are specifically aimed at this.
+**Decomposition quality is the primary driver of multi-hop answer quality.** The key failure mode is `under_decomposition` — treating "Compare Real Madrid and Manchester City CL performance over 3 seasons" as a single query instead of decomposing by club and season. The LangGraph split and `rewrite_query` improvements are specifically aimed at this.
 
 ---
 
@@ -302,8 +301,7 @@ flowchart TD
         SU["search_urls\n(Tavily, parallel per SQ)"]
         EX["extract_pages\n(Jina → trafilatura fallback\n+ page_cache + normalize)"]
         CH["chunk_pages\n(heading-aware\nMAX_CHARS=1500 OVERLAP=200\ngarbage filter)"]
-        RE["retrieve\n(BM25 + MiniLM cosine → RRF k=60\n→ TinyBERT CE top-8)"]
-        GE["generate_answers\n(concurrent streaming\nround-robin prompt packing\n48k char budget)"]
+        RG["retrieve_and_generate\n(BM25 + MiniLM cosine → RRF k=60\n→ TinyBERT CE top-8\nthen concurrent streaming)"]
         SY["synthesize\n(only if SQ > 1)"]
         EC["embedding_cleanup\n(free workspace chunks)"]
         CI["cache_insert\n(fire-and-forget)"]
@@ -323,9 +321,8 @@ flowchart TD
     EX -->|all fail| ED
     EX --> CH
     CH -->|0 chunks| ED
-    CH --> RE
-    RE --> GE
-    GE --> SY
+    CH --> RG
+    RG --> SY
     SY --> EC --> CI --> ED
 
     style PA fill:#10b981,color:#fff
@@ -334,8 +331,7 @@ flowchart TD
     style SU fill:#6366f1,color:#fff
     style EX fill:#6366f1,color:#fff
     style CH fill:#6366f1,color:#fff
-    style RE fill:#6366f1,color:#fff
-    style GE fill:#6366f1,color:#fff
+    style RG fill:#6366f1,color:#fff
 ```
 
 ---

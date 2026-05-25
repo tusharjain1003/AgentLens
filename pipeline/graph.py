@@ -1,5 +1,5 @@
 """
-LangGraph orchestration for the WebLens RAG pipeline (v9).
+LangGraph orchestration for the WebLens RAG pipeline (v12).
 
 Node graph:
 
@@ -12,16 +12,19 @@ Node graph:
                                  └─[miss]─→ search_urls
                                               └─→ extract_pages         (emits page_cache_info)
                                                     └─→ chunk_pages
-                                                           └─→ retrieve  (BM25/embed/RRF/rerank inner spans)
-                                                                  └─→ generate_answers
-                                                                         └─→ embedding_cleanup
-                                                                                └─→ cache_insert → emit_done → END
+                                                           └─→ retrieve_and_generate
+                                                                  (BM25/embed/RRF/rerank inner spans,
+                                                                   then streaming per-sub-query generation)
+                                                                  └─→ embedding_cleanup
+                                                                         └─→ cache_insert → emit_done → END
 
 Compared to v8, this graph:
   • Splits the old monolithic `node_analyze` into `rewrite_query` + `analyze`.
-  • Splits the old monolithic `search_pipeline` into 5 nodes (search_urls,
-    extract_pages, chunk_pages, retrieve, generate_answers) plus a
-    `embedding_cleanup` housekeeping node.
+  • Splits the old monolithic `search_pipeline` into dedicated graph nodes
+    (search_urls, extract_pages, chunk_pages, retrieve_and_generate) plus a
+    visible `embedding_cleanup` housekeeping node.
+  • Fuses retrieve + generate per sub-query so streaming can begin as soon as
+    a sub-query's own evidence is ranked.
   • Each retrieval sub-stage (BM25, dense embed, RRF, cross-encoder rerank) is
     a @traceable span inside `pipeline/retrieve.py` so it shows up with its
     proper run_type icon in LangSmith.

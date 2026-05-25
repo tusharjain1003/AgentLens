@@ -1,0 +1,39 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  railway:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check Railway token
+        id: railway_secret
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          if [ -n "$RAILWAY_TOKEN" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping deploy: set RAILWAY_TOKEN."
+          fi
+
+      - uses: actions/setup-node@v4
+        if: steps.railway_secret.outputs.available == 'true'
+        with:
+          node-version: "20"
+
+      - name: Install Railway CLI
+        if: steps.railway_secret.outputs.available == 'true'
+        run: npm install -g @railway/cli
+
+      - name: Deploy to Railway
+        if: steps.railway_secret.outputs.available == 'true'
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: railway up --detach

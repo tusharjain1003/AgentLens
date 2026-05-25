@@ -38,8 +38,7 @@ graph TB
         SEARCH["search_urls<br/>(Tavily, parallel)"]
         EXTRACT["extract_pages<br/>(Jina + trafilatura)"]
         CHUNK["chunk_pages<br/>(heading-aware)"]
-        RETRIEVE["retrieve<br/>(BM25 + dense + RRF + CE)"]
-        GENERATE["generate_answers<br/>(streaming per sub-query)"]
+        RETRIEVE_GEN["retrieve_and_generate<br/>(BM25 + dense + RRF + CE<br/>then streaming per sub-query)"]
         CLEANUP["embedding_cleanup"]
         CACHE_I["cache_insert<br/>(fire-and-forget)"]
         EMIT["emit_done<br/>(persist + SSE done)"]
@@ -81,16 +80,15 @@ graph TB
     CACHE_L -->|miss| SEARCH
     SEARCH --> EXTRACT
     EXTRACT --> CHUNK
-    CHUNK --> RETRIEVE
-    RETRIEVE --> GENERATE
-    GENERATE --> CLEANUP
+    CHUNK --> RETRIEVE_GEN
+    RETRIEVE_GEN --> CLEANUP
     CLEANUP --> CACHE_I --> EMIT
 
-    RETRIEVE --> MINILM
-    RETRIEVE --> TINYBERT
-    RETRIEVE --> BM25
-    GENERATE --> LLM_DS
-    GENERATE --> LLM_OAI
+    RETRIEVE_GEN --> MINILM
+    RETRIEVE_GEN --> TINYBERT
+    RETRIEVE_GEN --> BM25
+    RETRIEVE_GEN --> LLM_DS
+    RETRIEVE_GEN --> LLM_OAI
     ANALYZE --> LLM_DS
 
     EXTRACT --> JINA
@@ -111,7 +109,7 @@ graph TB
 
 ## 3. Request Lifecycle
 
-A single search request passes through up to 13 LangGraph nodes. The critical path and branching:
+A single search request passes through up to 12 LangGraph nodes. The critical path and branching:
 
 ```mermaid
 sequenceDiagram
@@ -149,11 +147,10 @@ sequenceDiagram
             Graph-->>FE: SSE: extract_done, page_cache_info
             Note over Graph: node: chunk_pages
             Graph-->>FE: SSE: chunk_done
-            Note over Graph: node: retrieve
+            Note over Graph: node: retrieve_and_generate
             Graph->>DB: pgvector cosine (dense)
             Graph->>Graph: BM25 → RRF → TinyBERT rerank
             Graph-->>FE: SSE: embed_done, retrieve_done, rerank_done
-            Note over Graph: node: generate_answers
             Graph->>LLM: stream per-sub-query (concurrent)
             Graph-->>FE: SSE: sub_answer_start/token/done × N
             opt len(sub_queries) > 1
@@ -185,7 +182,7 @@ LangGraph provides:
 - **`GraphState`** as a typed, serializable data contract between nodes
 - **Error short-circuit edges** on each search-pipeline node — a single node failure gracefully emits an error SSE event rather than crashing the full coroutine
 
-### Node Architecture (v9 — 13 nodes)
+### Node Architecture (v12 — 12 nodes)
 
 ```
 START
@@ -197,16 +194,15 @@ START
                             └─[miss]→ search_urls        │
                                        └── extract_pages │
                                              └── chunk_pages
-                                                   └── retrieve
-                                                         └── generate_answers
-                                                               └── embedding_cleanup
-                                                                     └── cache_insert
-                                                                           └── emit_done ──┘
+                                                   └── retrieve_and_generate
+                                                         └── embedding_cleanup
+                                                               └── cache_insert
+                                                                     └── emit_done ──┘
                                                                                    │
                                                                                   END
 ```
 
-**Design decision — node granularity.** The linear stages (`search_urls → extract_pages → chunk_pages → retrieve → generate_answers`) are split into separate nodes in v9. Each node has an error short-circuit edge to `emit_done`, and the `RuntimeContext.workspace` dict carries intermediate state (URL lists, extracted pages, chunks, ranked results) between nodes without bloating `GraphState` with non-serializable blobs.
+**Design decision — node granularity.** The expensive retrieval and generation stages are fused into `retrieve_and_generate` so each sub-query can begin streaming as soon as its own retrieval finishes. The surrounding stages (`search_urls → extract_pages → chunk_pages → retrieve_and_generate → embedding_cleanup → cache_insert`) remain separate LangGraph nodes with error short-circuit edges to `emit_done`. The `RuntimeContext.workspace` dict carries intermediate state (URL lists, extracted pages, chunks, ranked results) between nodes without bloating `GraphState` with non-serializable blobs.
 
 ### State Model
 

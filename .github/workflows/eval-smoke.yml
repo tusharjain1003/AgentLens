@@ -1,0 +1,125 @@
+name: Eval Smoke
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "app.py"
+      - "pipeline/**"
+      - "llm/**"
+      - "evals/**"
+      - "db/**"
+      - ".github/workflows/eval-smoke.yml"
+
+jobs:
+  eval-smoke:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: weblens
+          POSTGRES_USER: weblens
+          POSTGRES_PASSWORD: weblens
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U weblens -d weblens"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://weblens:weblens@localhost:5432/weblens
+      TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      LLM_PROVIDER: ${{ secrets.LLM_PROVIDER || 'deepseek' }}
+      ENVIRONMENT: development
+      PORT: 8765
+      SEMANTIC_CACHE_ENABLED: "false"
+      PUBLIC_MODE: "true"
+      WEBLENS_URL: http://127.0.0.1:8765
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check required secrets
+        id: secret_check
+        run: |
+          if [ -n "$TAVILY_API_KEY" ] && { [ -n "$DEEPSEEK_API_KEY" ] || [ -n "$OPENAI_API_KEY" ]; }; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping smoke eval: set TAVILY_API_KEY plus DEEPSEEK_API_KEY or OPENAI_API_KEY."
+          fi
+
+      - uses: actions/setup-python@v5
+        if: steps.secret_check.outputs.available == 'true'
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install Python dependencies
+        if: steps.secret_check.outputs.available == 'true'
+        run: python -m pip install -r requirements.txt
+
+      - name: Initialize database
+        if: steps.secret_check.outputs.available == 'true'
+        run: python db/setup.py
+
+      - name: Start backend
+        if: steps.secret_check.outputs.available == 'true'
+        run: |
+          uvicorn app:app --host 127.0.0.1 --port 8765 > /tmp/weblens.log 2>&1 &
+          for i in {1..60}; do
+            curl -fsS http://127.0.0.1:8765/api/health && exit 0
+            sleep 2
+          done
+          cat /tmp/weblens.log
+          exit 1
+
+      - name: Run smoke eval
+        if: steps.secret_check.outputs.available == 'true'
+        run: python evals/run_eval.py --smoke --trace off --concurrency 1
+
+      - name: Upload eval artifacts
+        uses: actions/upload-artifact@v4
+        if: steps.secret_check.outputs.available == 'true' && always()
+        with:
+          name: eval-smoke-results
+          path: evals/results/
+
+      - name: Comment smoke result
+        uses: actions/github-script@v7
+        if: github.event_name == 'pull_request' && steps.secret_check.outputs.available == 'true' && always()
+        with:
+          script: |
+            const fs = require("fs");
+            const path = require("path");
+            const root = "evals/results";
+            let body = "Smoke eval did not produce a summary.";
+            if (fs.existsSync(root)) {
+              const dirs = fs.readdirSync(root).sort();
+              const latest = dirs.reverse().find((d) => d.endsWith("_smoke"));
+              if (latest) {
+                const summaryPath = path.join(root, latest, "summary.json");
+                if (fs.existsSync(summaryPath)) {
+                  const s = JSON.parse(fs.readFileSync(summaryPath, "utf8"));
+                  const m = s.metrics_avg || {};
+                  const meta = s.meta || {};
+                  body = [
+                    "### WebLens smoke eval",
+                    "",
+                    `Run: \`${latest}\``,
+                    `Aggregate: **${Number(m.aggregate || 0).toFixed(3)}**`,
+                    `Pass / Partial / Fail: **${meta.pass || 0} / ${meta.partial || 0} / ${meta.fail || 0}**`,
+                    `Avg latency: **${meta.avg_latency_s || "n/a"}s**`
+                  ].join("\n");
+                }
+              }
+            }
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body
+            });
