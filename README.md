@@ -29,8 +29,6 @@
 
 ## Architecture Overview
 
-![System Architecture](assets/architecture.png)
-
 AgentLens answers natural-language questions by orchestrating real-time web retrieval, full-page extraction, hybrid semantic search, cross-encoder reranking, reflection-based gap recovery, claim verification, and LLM synthesis — all streamed to the frontend via Server-Sent Events before the pipeline completes.
 
 **Three non-negotiable design constraints drive the architecture:**
@@ -42,8 +40,6 @@ AgentLens answers natural-language questions by orchestrating real-time web retr
 ---
 
 ## Pipeline Walkthrough
-
-![LangGraph RAG Pipeline](assets/langgraph_rag_pipeline.png)
 
 The pipeline is a [LangGraph StateGraph](https://langchain-ai.github.io/langgraph/) — 14+ nodes with conditional routing edges, each emitting typed LangSmith spans.
 
@@ -490,7 +486,7 @@ See [DEPLOYMENT.md](docs/DEPLOYMENT.md) for detailed Railway, Heroku, and AWS in
 ├── dev/                   Local dev convenience scripts
 │   ├── run_backend.bat    Start FastAPI on localhost:8765 (Windows)
 │   └── run_frontend.bat   Start Vite dev server on localhost:5174 (Windows)
-├── assets/                Architecture diagrams, screenshots, LangSmith traces
+
 ├── .github/workflows/     CI, eval-smoke, and deploy workflows
 └── docs/                  Full documentation
     ├── ARCHITECTURE.md    System architecture
@@ -524,31 +520,6 @@ See [DEPLOYMENT.md](docs/DEPLOYMENT.md) for detailed Railway, Heroku, and AWS in
 | Reranker | TinyBERT cross-encoder | MonoT5, full BERT | 4× faster; ~2% quality gap; runs on CPU |
 | LLM primary | DeepSeek V3 | GPT-4o, Claude Sonnet | ~10× cheaper per token; equivalent synthesis quality |
 | Frontend state | Zustand | Redux, React Context | No boilerplate; natural fit for SSE handler patterns |
-
----
-
-## UI Screenshots
-
-### Home Page
-![AgentLens Home Page](assets/website-ss/home-page-fresh.png)
-
-### Reasoning Trace — Decomposed Sub-Queries
-![Reasoning Trace — Decomposed](assets/website-ss/reasoning-trace-decomposed.png)
-
-### Per-Subquery Retrieval & Generation
-![Reasoning Trace — Expanded](assets/website-ss/reasoning-trace-expanded-view-per-question.png)
-
-### Retrieved Passages Preview
-![Retrieved Passages](assets/website-ss/retrieved-passages-preview.png)
-
-### Citations, Tags & Follow-Ups
-![Citations & Follow-ups](assets/website-ss/citations-tags-and-preview-and-followups.png)
-
-### Evaluation Dashboard
-![Evaluation Tab](assets/website-ss/eval_tab.png)
-
-### LangSmith Trace — Single Query
-![LangSmith Trace](assets/langsmith/single_query.png)
 
 ---
 

@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     tavily_api_key: str
     deepseek_api_key: str = ""
     openai_api_key: str = ""
+    groq_api_key: str = ""
     llm_provider: str = "deepseek"
     jina_api_key: str = ""
     environment: str = "development"

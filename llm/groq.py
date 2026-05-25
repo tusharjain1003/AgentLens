@@ -1,7 +1,3 @@
-"""
-OpenAI fallback — gpt-4.1-mini (cost-efficient, strong quality).
-Used when DeepSeek is unavailable or LLM_PROVIDER=openai.
-"""
 from __future__ import annotations
 
 import logging
@@ -13,7 +9,8 @@ from pipeline.token_tracker import get_tracker
 
 logger = logging.getLogger(__name__)
 
-_MODEL = "gpt-4.1-mini"
+_MODEL = "llama-3.3-70b-versatile"
+_BASE_URL = "https://api.groq.com/openai/v1"
 
 
 def _estimate_tokens(messages: list[dict], completion: str = "") -> tuple[int, int]:
@@ -24,7 +21,6 @@ def _estimate_tokens(messages: list[dict], completion: str = "") -> tuple[int, i
 def _record_usage(model: str, prompt_tokens: int, completion_tokens: int) -> None:
     try:
         from pipeline.runtime import get_runtime
-
         tracker = get_runtime().token_tracker
     except Exception:
         tracker = get_tracker()
@@ -44,15 +40,18 @@ def _usage_tokens(usage) -> tuple[int, int] | None:
     return int(prompt), int(completion)
 
 
-class OpenAIClient(BaseLLMClient):
+class GroqClient(BaseLLMClient):
     def __init__(self) -> None:
-        self._client = AsyncOpenAI(api_key=settings.openai_api_key)
+        self._client = AsyncOpenAI(
+            api_key=settings.groq_api_key,
+            base_url=_BASE_URL,
+        )
 
     async def astream(
         self,
         prompt: str,
         system: str = "",
-        max_tokens: int = 2048,
+        max_tokens: int = 4096,
     ) -> AsyncIterator[str]:
         messages = []
         if system:
@@ -85,7 +84,7 @@ class OpenAIClient(BaseLLMClient):
         self,
         prompt: str,
         system: str = "",
-        max_tokens: int = 2048,
+        max_tokens: int = 4096,
     ) -> str:
         messages = []
         if system:
@@ -104,26 +103,3 @@ class OpenAIClient(BaseLLMClient):
             tokens = _estimate_tokens(messages, text)
         _record_usage(_MODEL, tokens[0], tokens[1])
         return text
-
-
-def get_llm():
-    """Return the best available LLM based on LLM_PROVIDER env var."""
-    from llm.deepseek import DeepSeekClient
-    from llm.groq import GroqClient
-
-    provider = settings.llm_provider.lower()
-
-    if provider == "groq":
-        logger.info("[llm] Using Groq (%s)", "llama-3.3-70b-versatile")
-        return GroqClient()
-
-    if provider == "openai":
-        logger.info("[llm] Using OpenAI (%s)", _MODEL)
-        return OpenAIClient()
-
-    if not settings.deepseek_api_key:
-        logger.warning("[llm] No DeepSeek key set; falling back to OpenAI")
-        return OpenAIClient()
-
-    logger.info("[llm] Using DeepSeek V3 (deepseek-chat)")
-    return DeepSeekClient()

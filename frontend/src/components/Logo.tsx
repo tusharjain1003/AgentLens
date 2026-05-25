@@ -19,7 +19,7 @@ export default function Logo({ size = "md", animate = false, className = "" }: P
     <div className={`inline-flex items-center ${cfg.gap} select-none ${className}`}>
       <Glyph size={cfg.glyph} />
       <span className={`${cfg.text} font-semibold tracking-tight text-neutral-100`}>
-        Web<span className="text-accent">Lens</span>
+        Agent<span className="text-accent">Lens</span>
       </span>
     </div>
   );
