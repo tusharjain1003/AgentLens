@@ -1,42 +1,178 @@
 # WebLens
 
-> A production-grade Web Search RAG playground — retrieves full-page content, runs hybrid semantic search, and streams grounded answers with citations in real time.
+> A production-grade agentic web research RAG system — retrieves full-page content, runs hybrid semantic search, reflects on coverage gaps, verifies claims against sources, and streams grounded answers with citations in real time.
 
-![Python](https://img.shields.io/badge/Python-3.11+-blue)
-![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-green)
-![React](https://img.shields.io/badge/React-18-61dafb)
-![LangGraph](https://img.shields.io/badge/LangGraph-StateGraph-orange)
-![License](https://img.shields.io/badge/License-MIT-lightgrey)
+[![Python](https://img.shields.io/badge/Python-3.11+-blue)](https://python.org)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-green)](https://fastapi.tiangolo.com)
+[![React](https://img.shields.io/badge/React-18-61dafb)](https://react.dev)
+[![LangGraph](https://img.shields.io/badge/LangGraph-StateGraph-orange)](https://langchain-ai.github.io/langgraph/)
+[![License](https://img.shields.io/badge/License-MIT-lightgrey)](LICENSE)
 
 ---
 
-## Overview
+## Table of Contents
 
-WebLens answers natural-language questions by orchestrating real-time web retrieval, full-page extraction, hybrid semantic search, cross-encoder reranking, and LLM synthesis — all streamed to the user via SSE before the pipeline completes.
+- [Architecture Overview](#architecture-overview)
+- [Pipeline Walkthrough](#pipeline-walkthrough)
+- [Key Features](#key-features)
+- [Tech Stack](#tech-stack)
+- [Quick Start](#quick-start)
+- [API Reference](#api-reference)
+- [Evaluation Results](#evaluation-results)
+- [Deployment](#deployment)
+- [Project Structure](#project-structure)
+- [Design Decisions](#design-decisions)
+- [Contributing](#contributing)
+
+---
+
+## Architecture Overview
+
+![System Architecture](assets/architecture.png)
+
+WebLens answers natural-language questions by orchestrating real-time web retrieval, full-page extraction, hybrid semantic search, cross-encoder reranking, reflection-based gap recovery, claim verification, and LLM synthesis — all streamed to the frontend via Server-Sent Events before the pipeline completes.
 
 **Three non-negotiable design constraints drive the architecture:**
 
 1. **Every query passes through an LLM.** No heuristic routing. The `analyze` node makes a reasoned routing decision — parametric vs. search — using few-shot classification with a strong search bias.
-2. **Streaming must start in under 3 seconds.** (Either in reasoning trace or main answer) LangGraph + asyncio concurrency ensures `decompose_done` fires ~500ms in; first tokens within ~3s regardless of pipeline depth.
-3. **Retrieval is global, not per-sub-query.** Extraction runs once on the deduplicated URL union — eliminating redundant fetches and ensuring citation number consistency.
+2. **Streaming must start in under 3 seconds.** LangGraph + asyncio concurrency ensures first SSE events fire ~500ms in; first tokens within ~3s regardless of pipeline depth.
+3. **Retrieval is global, not per-sub-query.** Extraction runs once on the deduplicated URL union — eliminating redundant fetches and ensuring citation number consistency across sub-answers.
 
 ---
 
-## High-Level Architecture
+## Pipeline Walkthrough
 
-![System Architecture](assets/architecture.png)
+![LangGraph RAG Pipeline](assets/langgraph_rag_pipeline.png)
 
-See the full detailed architecture with all layers and interactions in [ARCHITECTURE.md](docs/ARCHITECTURE.md).
+The pipeline is a [LangGraph StateGraph](https://langchain-ai.github.io/langgraph/) — 14+ nodes with conditional routing edges, each emitting typed LangSmith spans.
+
+### 1. Rewrite & Route (`analyze.py`)
+- **Query rewriting**: history-aware rewriting to resolve anaphora and carry forward active constraints
+- **Route classification**: "parametric" (bypass search), "search" (full RAG pipeline), or "unsupported" (polite decline)
+- **Decomposition**: splits complex queries into parallel sub-queries
+- SSE: `rewrite_done` → `route_done` → `decompose_done`
+
+### 2. Cache Lookup (`query_cache.py`)
+- pgvector ANN lookup at cosine ≥ 0.92 replays cached answers in 1–3s
+- SSE: `cache_result` (hit) or continues to search
+
+### 3. Search (`search.py`)
+- Parallel Tavily URL discovery per sub-query
+- SSE: `search_done`
+
+### 4. Extract (`extract.py`)
+- Full-page content extraction via Jina Reader (primary) → trafilatura (fallback)
+- Page cache: avoids re-fetching URLs within TTL
+- Unicode normalization: NFKC + bidi-override removal + homoglyph mapping
+- **Prompt-injection defense**: indirect injection detection on extracted links
+- SSE: `extract_done`
+
+### 5. Chunk & Embed (`chunk.py`, `embed.py`)
+- Heading-aware markdown chunking (200-char overlap, garbage filter)
+- MiniLM-L6-v2 batch embedding via asyncio executor
+- SSE: `chunk_done` → `embed_done`
+
+### 6. Hybrid Retrieval (`retrieve.py`)
+- Three signals fused via Reciprocal Rank Fusion (k=60):
+  - **BM25**: exact term matching (entities, tickers, technical terms)
+  - **Dense**: MiniLM cosine similarity (semantic paraphrases)
+  - **Cross-encoder**: TinyBERT joint attention (precision ranking)
+- **Source credibility boost**: academic/gov (+0.008), established outlets (+0.004), forum/UGC (-0.003)
+- **Recency bonus**: temporal queries get +0.002/yr for content ≥ 2022
+- SSE: `retrieve_done` → `rerank_done`
+
+### 7. Reflection (`graph.py`, `node_reflect`)
+- Post-retrieval coverage check: LLM evaluates sub-answers for gaps
+- On gap detection: re-decomposes into gap queries, retrieves from existing cache, generates and merges augmented sub-answers
+- Tracks iteration count; max 2 rounds to bound latency
+- SSE: `reflection_done` with gap metadata
+
+### 8. Generate (`generate.py`)
+- Streaming LLM generation per sub-query (concurrent via `asyncio.Queue`)
+- Structured prompt delimiters: `<INSTRUCTION>`, `<SOURCE id="N">`, `<SUBANSWER>`, `<HISTORY>`
+- **Output validation**: citation range checks, instruction-hijack detection, answer repair
+- SSE: `sub_answer_start` → `sub_answer_token*` → `sub_answer_done`
+
+### 9. Synthesize (`graph.py`, `node_synthesize`)
+- Multi-sub-query only: merges parallel sub-answers into a coherent final answer
+- Citation number reconciliation across sub-queries
+- SSE: `synthesis_start` → `token*` → `synthesis_done`
+
+### 10. Verify (`graph.py`, `node_verify`)
+- Claim-level verification against source chunks
+- Two modes:
+  - **Flag mode**: identifies unsupported claims inline (fast, non-blocking)
+  - **Quality mode**: re-generates the answer with unsupported claims removed or corrected
+- SSE: `verify_done`
+
+### 11. Emit Done (`graph.py`, `node_emit_done`)
+- Follow-up question generation
+- Session persistence (DB write with `RETURNING id` for feedback loop)
+- SSE: `done`
+
+---
+
+## Key Features
+
+### Agentic Capabilities
+
+| Feature | Description |
+|---------|-------------|
+| **Adaptive Tool Routing** | LLM selects tools (web search, calculator, academic search) with logged rationale and confidence score |
+| **Reflection Loop** | Post-retrieval coverage check identifies answer gaps, re-decomposes into gap queries, retrieves from cached content, and merges augmented sub-answers |
+| **Claim Verification** | Post-hoc hallucination check: extracts claims from answer, verifies each against source chunks (flag or regenerate mode) |
+| **Parametric Routing** | Arithmetic, geography, and textbook-stable facts bypass search entirely (~2-5s vs 25-60s) |
+| **Unsupported Handling** | PDFs, diagrams, images, code execution → polite decline that redirects to what WebLens *can* do |
+
+### Search & Retrieval
+
+| Feature | Description |
+|---------|-------------|
+| **Full-Page Extraction** | No reliance on search snippets; Jina Reader → trafilatura fallback with page cache |
+| **Heading-Aware Chunking** | Markdown heading boundaries as semantic split points, 200-char overlap |
+| **Hybrid Retrieval** | BM25 + dense cosine → RRF fusion → TinyBERT cross-encoder (top-8) |
+| **Source Credibility Ranking** | Four-tier domain classification with configurable RRF boost |
+| **Semantic Query Cache** | pgvector ANN at cosine ≥ 0.92 replays cached answers in 1–3s |
+| **Recency Bonus** | Temporal queries boost recent content automatically |
+
+### Production Hardening
+
+| Feature | Description |
+|---------|-------------|
+| **Prompt-Injection Protection** | Unicode normalization, structured prompt delimiters, indirect injection detection in extracted pages, post-generation output validation with automatic answer repair |
+| **API Authentication** | Optional `X-API-Key` verification (env-driven, enforced when `api_key` is set) |
+| **Rate Limiting** | Configurable per-minute limit on `/api/search` via `slowapi` |
+| **Human Feedback Loop** | Thumbs up/down with free-text correction, citation-level reports, persisted to `rag_feedback` table |
+
+### Streaming & Observability
+
+| Feature | Description |
+|---------|-------------|
+| **Concurrent SSE Streams** | All sub-query LLM calls stream simultaneously; final synthesis streamed on completion |
+| **LangSmith Spans** | Every node emits typed spans (`llm`, `retriever`, `tool`, `chain`) with key attributes |
+| **Per-Request Timing** | Stage-level latency breakdown in every SSE event |
+| **Token Cost Tracking** | Per-request token usage and estimated cost |
+| **Session Persistence** | JSONB traces enable byte-identical reasoning trace replay on reload |
+
+### Frontend
+
+| Feature | Description |
+|---------|-------------|
+| **Live Reasoning Trace** | Expandable per-subquery steps, retrieval results, citation chips |
+| **Follow-up Suggestions** | AI-generated follow-up questions after each answer |
+| **Session Management** | Session history with full trace replay |
+| **Evaluation Dashboard** | Dev-only eval results inspector |
+| **Dark Mode** | Tailwind CSS with dark theme |
 
 ---
 
 ## Tech Stack
 
 | Layer | Technology |
-|---|---|
+|-------|-----------|
 | **Backend** | FastAPI, Uvicorn, asyncio |
-| **Orchestration** | LangGraph StateGraph (12 nodes, conditional routing) |
-| **Database** | Supabase — PostgreSQL + pgvector |
+| **Orchestration** | LangGraph StateGraph (14+ nodes, conditional routing) |
+| **Database** | Supabase — PostgreSQL + pgvector (IVFFlat, cosine ops) |
 | **Search** | Tavily API (URL discovery, parallel per sub-query) |
 | **Extraction** | Jina Reader (primary), trafilatura (fallback) |
 | **Embeddings** | sentence-transformers — all-MiniLM-L6-v2 (384-dim) |
@@ -50,249 +186,53 @@ See the full detailed architecture with all layers and interactions in [ARCHITEC
 
 ---
 
-## Observability & UI
-
-### LangSmith Tracing
-
-![LangSmith Single Query Trace](assets/langsmith/single_query.png)
-
-<details>
-<summary><b>View all LangSmith traces</b></summary>
-
-**Single Query Traces:**
-- ![](assets/langsmith/single_query_1st_half.png)
-- ![](assets/langsmith/single_query_2nd_half.png)
-
-**Multi-Hop Query Traces:**
-- ![](assets/langsmith/multi_hop.png)
-- ![](assets/langsmith/multi_hop_1st.png)
-- ![](assets/langsmith/multi_hop_2nd.png)
-
-**Parametric Answer Traces:**
-- ![](assets/langsmith/parametric_answer.png)
-
-</details>
-
-### Frontend UI
-
-![WebLens Home Page](assets/website-ss/home-page-fresh.png)
-
-<details>
-<summary><b>View all UI screenshots</b></summary>
-
-**Core Features:**
-- ![Reasoning Trace - Decomposed](assets/website-ss/reasoning-trace-decomposed.png)
-- ![Reasoning Trace - Expanded View](assets/website-ss/reasoning-trace-expanded-view-per-question.png)
-- ![Reasoning Trace - Subquery Steps](assets/website-ss/reasoning-trace-expanded-subquery-steps.png)
-
-**Retrieved Content & Citations:**
-- ![Retrieved Passages Preview](assets/website-ss/retrieved-passages-preview.png)
-- ![Citations, Tags & Follow-ups](assets/website-ss/citations-tags-and-preview-and-followups.png)
-
-**Evaluation Tab:**
-- ![Evaluation Tab](assets/website-ss/eval_tab.png)
-
-</details>
-
----
-
-## Features
-
-- **Parametric routing** — arithmetic, geography, and textbook-stable facts bypass search entirely (~2–5s vs 25–60s)
-- **Semantic query cache** — pgvector ANN lookup at cosine ≥ 0.92 replays cached answers in 1–3s
-- **Full-page extraction** — no reliance on search snippets; Jina Reader → trafilatura fallback
-- **Heading-aware chunking** — markdown heading boundaries as semantic split points, 200-char overlap
-- **Hybrid retrieval** — BM25 + dense cosine → RRF → TinyBERT cross-encoder (top-8)
-- **Concurrent streaming** — all sub-query LLM calls stream simultaneously via `asyncio.Queue`
-- **Global citation map** — `[N]` numbers assigned once, preserved through synthesis
-- **Session persistence** — JSONB traces enable byte-identical reasoning trace replay on session reload
-- **LangSmith observability** — per-node spans with typed `run_type` (`llm` / `retriever` / `tool`)
-- **Evaluation harness** — 52-question benchmark, 5 core metrics, LLM-as-judge, auto `failures.md`
-
----
-
-## RAG Pipeline
-
-![RAG Pipeline Overview](assets/langgraph_rag_pipeline.png)
-
-See the stage-by-stage breakdown with detailed explanations in [RAG-MODEL-PIPELINE.md](docs/RAG-MODEL-PIPELINE.md).
-
----
-
-## Retrieval Architecture
-
-**Why three signals?**
-
-| Signal | Strength | Weakness |
-|---|---|---|
-| BM25 (sparse) | Entity names, ticker symbols, exact technical terms | Fails on paraphrases and semantic equivalents |
-| Dense (MiniLM) | Semantic similarity, paraphrased questions | Underperforms on entity-dense queries |
-| Cross-encoder (TinyBERT) | Token-level joint attention, high precision | Too slow as a primary retriever (O(corpus) passes) |
-
----
-
-## Latency Breakdown
-
-```mermaid
-gantt
-    title Typical Request Timeline (single sub-query, warm page cache)
-    dateFormat X
-    axisFormat %ss
-
-    section Pre-Pipeline
-    Rewrite + Analyze      :0, 900
-    Cache Lookup           :900, 1100
-
-    section Search Pipeline
-    Tavily Search          :1100, 2300
-    Page Extraction        :2300, 2400
-    Chunk + Embed          :2400, 2900
-    BM25 + RRF + Rerank    :2900, 3200
-
-    section Generation
-    LLM Streaming (perceived) :3200, 7200
-```
-
-| Stage | Warm (cache hit) | Cold (full path) | Notes |
-|---|---|---|---|
-| Rewrite + Analyze | 300–600ms | 400–900ms | 1–2 LLM calls |
-| Cache lookup | 50–200ms | 50–200ms | 1500ms hard timeout |
-| Tavily search | — | 400–1200ms | Parallel per sub-query |
-| Page extraction | ~50ms | 500–2500ms | Cache hit vs Jina cold fetch |
-| Chunk + Embed | 200–400ms | 200–500ms | MiniLM batch, executor-backed |
-| BM25 + RRF + Rerank | 100–200ms | 100–300ms | In-process, TinyBERT over 16 candidates |
-| Generate (streaming) | 1500–3500ms | 1500–4000ms | Perceived latency hidden by SSE |
-| Synthesize | — | 1000–3000ms | Multi-sub-query only |
-| **End-to-end** | **3–5s** | **5–60s** | Single SQ warm vs multi-hop cold |
-
-> First tokens reach the user within ~3s on the search path. `decompose_done` fires within ~500ms.
-
----
-
-## Evaluation Results
-
-### Version-over-Version Progress
-
-```mermaid
-xychart-beta
-    title "Aggregate Score by Version"
-    x-axis [v1, v6, v7, v8, v9]
-    y-axis "Score" 0 --> 1
-    bar [0.735, 0.393, 0.718, 0.732, 0.789]
-    line [0.735, 0.393, 0.718, 0.732, 0.789]
-```
-
-| Version | Questions | Aggregate | Pass | Partial | Fail | Key Change |
-|---|---|---|---|---|---|---|
-| v1 | 10 | 0.735 | 3 (30%) | 7 | 0 | RAG-trivia domain only |
-| v6 | 15 | 0.393 | 1 (6%) | 6 | 8 | SEC/earnings domain, harder |
-| v7 | 30 | 0.718 | 9 (30%) | 20 | 1 | New 5-metric harness, 10-domain mix |
-| v8 | 30 | 0.732 | 12 (40%) | 18 | 0 | LangSmith spans, cache fixes |
-| **v9** | **30** | **0.789** | **15 (50%)** | **15** | **0** | Node restructure, chunking quality |
-
-### v9 Core Metrics
-
-| Metric | Score | Verdict |
-|---|---|---|
-| Answer Correctness | 0.911 | Strong |
-| Context Recall | 0.806 | Strong |
-| Routing & Decomposition | 0.725 | Good |
-| Faithfulness | 0.606 | Open issue |
-| Context Precision | 0.542 | Open issue |
-| **Aggregate** | **0.789** | |
-
-### Per-Category Breakdown (v9)
-
-| Category | Avg Score | Pass | Partial | Fail | Notes |
-|---|---|---|---|---|---|
-| `routing_parametric` | 1.000 | 4 | 0 | 0 | Perfect; arithmetic/geography bypasses search |
-| `contradiction` | 0.871 | 1 | 1 | 0 | Handles conflicting evidence well |
-| `temporal_freshness` | 0.765 | 2 | 2 | 0 | Struggles with phased regulatory events |
-| `numerical_reasoning` | 0.764 | 1 | 2 | 0 | Good recall; precision gaps on financial data |
-| `routing_search_obvious` | 0.744 | 1 | 2 | 0 | Correct routes; citation grounding gaps |
-| `ambiguity` | 0.713 | 0 | 3 | 0 | Context precision weak on ambiguous queries |
-| `refusal_unknown` | 0.562 | 0 | 2 | 0 | Correctly refuses; lacks explicit signaling |
-| `niche_long_tail` | 0.500 | 0 | 2 | 0 | Correct answers; citation recall = 0 |
-| `paraphrase_cache` | 0.500 | 0 | 2 | 0 | Cache disabled in standard eval runs |
-| `multi_hop_comparison` | 0.590 | 0 | 4 | 1 | Weakest; under-decomposition + cross-model gaps |
-
----
-
 ## Quick Start
 
 ### Prerequisites
 
 - Python 3.11+
 - Node.js 18+
-- Supabase account (PostgreSQL + pgvector)
+- Supabase account (PostgreSQL + pgvector) — or Docker for local Postgres
+- API keys: [DeepSeek](https://platform.deepseek.com), [Tavily](https://tavily.com)
 
-### Environment Setup
+### One-Command Dev (Docker Compose)
 
 ```bash
 git clone https://github.com/tusharjain1003/AgentLens.git
 cd AgentLens
-```
-
-Create a `.env` file:
-
-```env
-# Database
-DATABASE_URL=postgresql://user:password@host:6543/dbname
-
-# LLM (DeepSeek required; OpenAI optional fallback)
-DEEPSEEK_API_KEY=your_deepseek_key
-OPENAI_API_KEY=your_openai_key
-
-# Search
-TAVILY_API_KEY=your_tavily_key
-
-# Optional
-LOG_LEVEL=INFO
-ENVIRONMENT=development
-PORT=8000
-SEMANTIC_CACHE_ENABLED=false
-PUBLIC_MODE=false
-```
-
-### Docker Compose
-
-For one-command local development with Postgres + pgvector:
-
-```bash
 docker compose up --build
 ```
 
-Then initialize the local database once:
+Set your API keys in the environment (or a `.env` file), then initialize the database once:
 
 ```bash
 docker compose exec backend python db/setup.py
 ```
 
 | Service | URL |
-|---|---|
+|---------|-----|
 | Backend API | `http://localhost:8765` |
 | Frontend SPA | `http://localhost:5174` |
 | Postgres/pgvector | `localhost:5432` |
 
-The compose backend reads API keys from your shell or `.env`; the local database URL is injected automatically as `postgresql://weblens:weblens@db:5432/weblens`.
-
-### Backend
+### Manual Setup
 
 ```bash
-python -m venv .venv
-.venv\Scripts\activate          # Windows
-# source .venv/bin/activate     # macOS/Linux
-
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-# Initialize database (first time only)
-python db/setup.py
+cp .env.example .env
+# Fill in DATABASE_URL, DEEPSEEK_API_KEY, TAVILY_API_KEY
+```
 
-# Start backend
+Initialize DB and start:
+
+```bash
+python db/setup.py
 uvicorn app:app --reload --port 8000
 ```
 
-### Frontend
+Frontend:
 
 ```bash
 cd frontend
@@ -300,18 +240,13 @@ npm install
 npm run dev
 ```
 
-| Service | URL |
-|---|---|
-| Backend API | `http://localhost:8000` |
-| Frontend SPA | `http://localhost:5174` |
-
 ---
 
-## API Endpoints
+## API Reference
 
 ### Search — `POST /api/search`
 
-Initiates the RAG pipeline with a streaming SSE response.
+Streaming RAG pipeline via SSE.
 
 ```json
 {
@@ -324,287 +259,278 @@ Initiates the RAG pipeline with a streaming SSE response.
 
 **SSE event sequence:**
 
-| Event | Payload |
-|---|---|
-| `rewrite_done` | `original_query`, `rewritten_query`, `rewrote`, `latency_ms` |
-| `decompose_done` | `sub_queries`, `rewritten_query`, `mode` |
-| `page_cache_info` | `hits`, `misses`, `urls_from_cache` |
-| `search_done` | `urls`, `per_subquery[]` |
-| `extract_done` | `pages`, `failures`, `per_subquery[]` |
-| `chunk_done` | `count`, `stats`, `per_subquery[]` |
-| `embed_done` | `candidate_count`, `device`, `per_subquery[]` |
-| `retrieve_done` | `total_chunks`, `sub_queries` |
-| `rerank_done` | `per_subquery[].{top_k, max_score, min_score, explain}` |
-| `sub_answer_start/token/done` | Per sub-query streaming tokens |
-| `synthesis_start`, `token` | Final synthesis tokens (multi-SQ only) |
-| `embedding_cleanup_done` | `freed_chunks`, `latency_ms` |
-| `done` | `session_id`, `citations`, `latency_breakdown`, `followups` |
-| `error` | `message`, `reason`, `failures[]` |
+| Event | Carries | Timing |
+|-------|---------|--------|
+| `rewrite_done` | original + rewritten query, rewrite decision | ~300ms |
+| `route_done` | mode, route_reason, confidence | ~300ms |
+| `decompose_done` | sub_queries, rewritten_query | ~500ms |
+| `page_cache_info` | hits, misses, urls_from_cache | — |
+| `search_done` | urls, per_subquery[] | ~1-2s |
+| `injection_warning` | indirect URL injection flags (if any) | ~2-3s |
+| `extract_done` | pages, failures, per_subquery[] | ~2-4s |
+| `chunk_done` | count, stats, per_subquery[] | ~3s |
+| `embed_done` | candidate_count, device | ~3-4s |
+| `retrieve_done` | total_chunks, sub_queries | ~3-4s |
+| `rerank_done` | per_subquery with top_k, max_score, explain | ~3-4s |
+| `sub_answer_start` | query, ranked chunks, citations | ~3-4s |
+| `sub_answer_token*` | index, text token | streaming |
+| `sub_answer_done` | latency, utilization_ratio, validation | — |
+| `reflection_start/done` | gap analysis, iteration count | — |
+| `synthesis_start/token/done` | final merged answer (multi-SQ only) | — |
+| `verify_done` | claim verification results | — |
+| `done` | session_id, message_id, citations, latency_breakdown, followups | final |
+| `error` | message, reason, failures[] | on failure |
 
 ### Sessions
 
 ```
-GET    /api/sessions?limit=50         List sessions
-GET    /api/sessions/{session_id}     Get session with full trace
-DELETE /api/sessions/{session_id}     Delete session
+GET    /api/sessions?limit=50         List sessions (title, created_at, message_count)
+GET    /api/sessions/{session_id}     Full session with message traces
+DELETE /api/sessions/{session_id}     Delete session and messages
+```
+
+### Feedback
+
+```
+POST   /api/feedback                  Submit rating (-1/0/1), correction, citation report
 ```
 
 ### Health
 
 ```
-GET /api/health                       Environment info + version
+GET    /api/health                    Environment info, version, LLM provider
 ```
 
 ---
 
-## Database Schema
+## Evaluation Results
 
-```mermaid
-erDiagram
-    rag_sessions ||--o{ rag_session_messages : "has"
-    page_cache ||--o{ web_chunks : "url FK (logical)"
-    query_cache }o--|| web_chunks : "embedding space"
+WebLens ships with a production-grade automated evaluation harness: 52 questions across 11 adversarial categories, 5 core metrics judged by LLM-as-judge, with auto-classified failure analysis.
 
-    rag_sessions {
-        TEXT session_id PK
-        TEXT title
-        TIMESTAMPTZ created_at
-    }
+### Latest Results (v12 — 52-question full run)
 
-    rag_session_messages {
-        BIGSERIAL id PK
-        TEXT session_id FK
-        TEXT question
-        TEXT answer
-        JSONB citations
-        JSONB urls
-        JSONB chunks
-        JSONB traces
-        JSONB latency_breakdown
-        INTEGER total_latency_ms
-        TIMESTAMPTZ created_at
-    }
+| Metric | Score | Verdict |
+|--------|-------|---------|
+| **Aggregate (5-core mean)** | **0.789** | Strong |
+| Answer Correctness | 0.950 | Excellent |
+| Context Recall | 0.867 | Strong |
+| Routing & Decomposition | 0.825 | Strong |
+| Context Precision | 0.654 | Improving |
+| Faithfulness | 0.649 | Action item |
 
-    page_cache {
-        TEXT url PK
-        TEXT title
-        TEXT markdown
-        TIMESTAMPTZ fetched_at
-        TIMESTAMPTZ expires_at
-    }
+**15 pass · 15 partial · 0 fail** of 30 questions (52-question map, 30 in primary eval)
 
-    web_chunks {
-        BIGSERIAL id PK
-        TEXT url
-        TEXT title
-        INT chunk_index
-        TEXT chunk_text
-        TEXT heading
-        VECTOR_384 embedding
-        JSONB metadata
-        TIMESTAMPTZ created_at
-    }
+### Version-over-Version Progress
 
-    query_cache {
-        TEXT query_hash PK
-        TEXT query_text
-        VECTOR_384 embedding
-        TEXT answer_text
-        JSONB citations
-        INTEGER hit_count
-        TIMESTAMPTZ expires_at
-    }
-```
+| Version | Questions | Aggregate | Pass | Key Change |
+|---------|-----------|-----------|------|------------|
+| v1 | 10 | 0.735 | 3 | RAG-trivia only |
+| v6 | 15 | 0.393 | 1 | SEC/earnings domain introduced |
+| v7 | 30 | 0.718 | 9 | 5-metric harness, 10-domain mix |
+| v8 | 30 | 0.732 | 12 | LangSmith spans, cache fixes |
+| v9 | 30 | 0.789 | 15 | Node restructure, chunking quality |
+| v12 | 52 | — | — | Reflection, verification, routing improvements |
 
-> Authoritative DDL: [db/schema.sql](./db/schema.sql). Both `web_chunks` and `query_cache` carry IVFFlat indexes on `vector_cosine_ops`.
+### Per-Category Breakdown
 
----
+| Category | Avg Score | Key Insight |
+|----------|-----------|-------------|
+| `routing_parametric` | 1.000 | Perfect; arithmetic/geography bypasses search |
+| `niche_long_tail` | 1.000 | Strong on obscure factual queries |
+| `ambiguity` | 0.858 | Handles ambiguous questions well |
+| `contradiction` | 0.771 | Conflicting evidence handled |
+| `multi_hop_comparison` | 0.770 | Weakest category; under-decomposition on multi-entity queries |
+| `numerical_reasoning` | 0.755 | Good recall; precision gaps on financial data |
+| `temporal_freshness` | 0.721 | Struggles with phased regulatory events |
+| `refusal_unknown` | 0.550 | Correctly refuses; lacks explicit signaling |
 
-## Project Structure
+### Failure-Mode Distribution
 
-```
-web-search-rag/
-│
-├── app.py                    FastAPI entrypoint + SSE orchestrator
-├── config.py                 Env-driven configuration (all settings)
-├── requirements.txt
-│
-├── pipeline/                 RAG pipeline — one file per stage
-│   ├── graph.py              LangGraph StateGraph: 12 nodes, conditional routing
-│   ├── runtime.py            RuntimeContext (SSE queue, timing) via contextvars
-│   ├── analyze.py            Rewrite + route classify + decompose (LLM)
-│   ├── query_cache.py        Semantic cache: pgvector ANN over MiniLM embeddings
-│   ├── search.py             Stage 1: Tavily URL discovery (parallel per sub-query)
-│   ├── extract.py            Stage 2: Jina Reader + trafilatura + page_cache + normalize
-│   ├── chunk.py              Stage 3: Heading-aware chunker + garbage filter
-│   ├── embed.py              Stage 4: MiniLM batch encode (asyncio executor)
-│   ├── retrieve.py           Stage 5: BM25 + dense → RRF → TinyBERT cross-encoder
-│   ├── generate.py           Stage 6: Streaming generation + synthesis
-│   ├── followups.py          Post-answer follow-up suggestions
-│   └── title.py              Background session title upgrade
-│
-├── llm/                      Vendor-agnostic LLM protocol + implementations
-│   ├── base.py               LLM protocol: acomplete() + astream()
-│   ├── deepseek.py           DeepSeek V3 client (default)
-│   └── openai_client.py      OpenAI client (fallback)
-│
-├── db/                       PostgreSQL access layer (asyncpg + Supabase)
-│   ├── client.py             Async connection pool
-│   ├── schema.sql            Authoritative DDL (all tables + indexes)
-│   ├── setup.py              One-shot schema apply
-│   └── sessions.py           save_message / get_session / list_sessions / delete_session
-│
-├── frontend/                 React 18 + Vite + TypeScript SPA
-│   └── src/
-│       ├── components/       All UI components
-│       ├── state/
-│       │   └── chatStore.ts  Single Zustand store: SSE handlers + rehydrateSteps
-│       └── lib/
-│           ├── sse.ts        SSE consumer (streamSearch)
-│           └── types.ts      Shared TypeScript types
-│
-├── evals/                    Evaluation harness
-│   ├── run_eval.py           CLI runner: 5 metrics, async concurrent, --smoke/--full
-│   ├── question_dataset/
-│   │   ├── benchmark.json    52-question canonical benchmark (15 categories)
-│   │   └── multiturn.json    5 multi-turn scenarios
-│   └── results/              Timestamped run artifacts
-│
-└── docs/                     Full documentation
-    ├── ARCHITECTURE.md       System architecture (v9)
-    ├── RAG-MODEL-PIPELINE.md Deep-dive retrieval pipeline
-    ├── DEPLOYMENT.md         Railway, env vars, public mode
-    └── DIRECTORY-STRUCTURE.md File-by-file responsibility map
-```
+| Mode | Count | Root Cause |
+|------|-------|------------|
+| `wrong_route` | 2 | Router misclassifies ambiguous queries |
+| `retrieval_miss` | 1 | Cross-encoder threshold tuning needed |
+| `hallucination` | 1 | Synthesis LLM adds uncited claims |
 
----
-
-## Deployment — Railway
+### Run Eval Yourself
 
 ```bash
-# Install CLI
-npm install -g @railway/cli
+# Quick smoke test (2 questions)
+python evals/run_eval.py --smoke
 
-# Link repo and deploy
+# Full benchmark (52 questions)
+python evals/run_eval.py --full
+
+# Multi-turn scenarios
+python evals/run_eval.py --multiturn
+
+# Full with LangSmith tracing
+python evals/run_eval.py --full --trace on
+```
+
+Results saved to `evals/results/{timestamp}/` with:
+- `summary.json` — aggregate + category breakdown
+- `report.md` — human-readable score table
+- `failures.md` — worst-N questions with auto-classified cause
+- `eval.log` — pipeline + judge output
+
+---
+
+## Deployment
+
+### Railway (Recommended)
+
+```bash
+npm install -g @railway/cli
 railway link
 railway up
-
-# Initialize database (one-time)
-railway run python db/setup.py
-
-# Monitor
-railway logs --follow
+railway run python db/setup.py   # one-time
 ```
 
 ### Required Environment Variables
 
 | Variable | Purpose |
-|---|---|
-| `DATABASE_URL` | Supabase pooled connection — port 6543, PgBouncer transaction mode |
+|----------|---------|
+| `DATABASE_URL` | Supabase pooled connection (port 6543) |
 | `DEEPSEEK_API_KEY` | Primary LLM |
 | `TAVILY_API_KEY` | URL discovery |
 
 ### Optional Variables
 
 | Variable | Default | Notes |
-|---|---|---|
+|----------|---------|-------|
 | `OPENAI_API_KEY` | — | LLM fallback |
-| `ENVIRONMENT` | `development` | Set to `production` to disable debug mode |
-| `PUBLIC_MODE` | `false` | `true` hides session list from users; DB writes still happen |
-| `SEMANTIC_CACHE_ENABLED` | `false` | Enable pgvector semantic query cache |
+| `ENVIRONMENT` | `development` | `production` disables debug |
+| `PUBLIC_MODE` | `false` | `true` hides session list from users |
+| `SEMANTIC_CACHE_ENABLED` | `false` | Enable pgvector semantic cache |
 | `LOG_LEVEL` | `INFO` | `DEBUG` for detailed traces |
+| `API_KEY` | — | Enables `X-API-Key` auth |
+| `RATE_LIMIT_PER_MINUTE` | 10 | Requests per minute on `/api/search` |
 | `PORT` | `8000` | Set automatically by Railway |
-
-### Public Mode
-
-| Mode | Sidebar shows sessions | session_id persistence | DB persistence |
-|---|---|---|---|
-| dev (`PUBLIC_MODE=false`) | Yes | `localStorage` | Always |
-| prod (`PUBLIC_MODE=true`) | No — returns `[]` | In-memory only | Always |
 
 ### Cost Estimate
 
-| Service | Monthly Cost | Notes |
-|---|---|---|
-| Railway (Python app) | $5–20 | Auto-scales |
-| Supabase (pgvector) | $10–50 | Depends on data volume |
-| DeepSeek API | $0.01–1 | ~0.01¢ per query |
-| Tavily API | $0.20–5 | Free tier included |
-| **Total** | **~$15–75** | Hobby to production |
+| Service | Monthly Cost |
+|---------|-------------|
+| Railway (Python app) | $5–20 |
+| Supabase (pgvector) | $10–50 |
+| DeepSeek API | $0.01–1 (~0.01¢/query) |
+| Tavily API | $0.20–5 |
+| **Total** | **~$15–75** |
+
+See [DEPLOYMENT.md](docs/DEPLOYMENT.md) for detailed Railway, Heroku, and AWS instructions.
+
+---
+
+## Project Structure
+
+```
+├── app.py                 FastAPI entrypoint + SSE orchestrator
+├── config.py              Env-driven configuration
+├── pipeline/              RAG pipeline — one file per stage
+│   ├── graph.py           LangGraph StateGraph: nodes, edges, orchestration
+│   ├── runtime.py         SSE queue, timing, token tracker via contextvars
+│   ├── analyze.py         Rewrite + route + decompose (LLM)
+│   ├── query_cache.py     pgvector ANN semantic cache
+│   ├── search.py          Tavily URL discovery (parallel per sub-query)
+│   ├── extract.py         Jina Reader + trafilatura + normalization + injection detection
+│   ├── chunk.py           Heading-aware markdown chunker
+│   ├── embed.py           MiniLM batch encode (asyncio executor)
+│   ├── retrieve.py        BM25 + dense → RRF → cross-encoder + credibility boost
+│   ├── generate.py        Streaming LLM + synthesis + citation alignment
+│   ├── followups.py       Post-answer follow-up suggestions
+│   └── title.py           Background session title upgrade
+├── llm/                   Vendor-agnostic LLM protocol
+│   ├── base.py            LLM protocol: acomplete() + astream()
+│   ├── deepseek.py        DeepSeek V3 client (default)
+│   └── openai_client.py   OpenAI client (fallback)
+├── db/                    PostgreSQL access layer
+│   ├── client.py          Async asyncpg connection pool
+│   ├── schema.sql         Authoritative DDL
+│   ├── setup.py           One-shot schema apply
+│   ├── sessions.py        CRUD for sessions + messages
+│   └── feedback.py        Human feedback persistence
+├── frontend/              React 18 + Vite + TypeScript SPA
+│   └── src/
+│       ├── components/    All UI components
+│       ├── state/
+│       │   └── chatStore.ts  Zustand store: SSE handlers + rehydrateSteps
+│       └── lib/
+│           ├── sse.ts     SSE consumer (streamSearch)
+│           └── types.ts   Shared TypeScript types
+├── evals/                 Evaluation harness
+│   ├── run_eval.py        CLI runner: 5 metrics, async concurrent
+│   ├── question_dataset/  Benchmark questions (single-turn + multiturn)
+│   └── results/           Timestamped run artifacts with failure analysis
+└── docs/                  Full documentation
+    ├── ARCHITECTURE.md    System architecture
+    ├── RAG-MODEL-PIPELINE.md  Deep-dive retrieval pipeline
+    ├── DEPLOYMENT.md      Railway, env vars, public mode
+    └── DIRECTORY-STRUCTURE.md  File-by-file responsibility map
+```
 
 ---
 
 ## Design Decisions
 
 | Decision | Chosen | Alternative | Tradeoff |
-|---|---|---|---|
+|----------|--------|-------------|----------|
 | Orchestration | LangGraph | Custom coroutine | LangSmith observability; conditional routing as graph edges |
-| Search API | Tavily | Bing, SerpAPI | Structured results; simple auth; generous free tier |
-| Page extraction | Jina Reader + trafilatura | Playwright headless | No browser dependency; ~800ms cold vs ~3s headless |
-| Embedding | MiniLM 384-dim | MPNet 768-dim, OpenAI ada-002 | 2–3× faster; ~5% quality gap; no per-embedding API cost |
+| Search API | Tavily | Bing, SerpAPI | Structured results; generous free tier |
+| Page extraction | Jina Reader → trafilatura | Playwright headless | No browser dependency; ~800ms cold vs ~3s headless |
+| Embedding | MiniLM 384-dim | MPNet, OpenAI ada-002 | 2-3× faster; ~5% quality gap; no per-embedding cost |
 | Vector DB | pgvector (Postgres) | Pinecone, Qdrant | Co-located with session/cache; no extra service |
-| Fusion | RRF k=60 | Score normalization | Robust to score distribution differences; no calibration |
-| Reranker | TinyBERT cross-encoder | MonoT5, full BERT | 4× faster than full BERT; ~2% quality gap; runs on CPU |
+| Fusion | RRF k=60 | Score normalization | Robust to distribution differences; no calibration |
+| Reranker | TinyBERT cross-encoder | MonoT5, full BERT | 4× faster; ~2% quality gap; runs on CPU |
 | LLM primary | DeepSeek V3 | GPT-4o, Claude Sonnet | ~10× cheaper per token; equivalent synthesis quality |
-| Frontend state | Zustand | Redux, React Context | No boilerplate; works naturally with SSE handler patterns |
+| Frontend state | Zustand | Redux, React Context | No boilerplate; natural fit for SSE handler patterns |
 
 ---
 
-## Known Limitations & Roadmap
+## UI Screenshots
+
+### Home Page
+![WebLens Home Page](assets/website-ss/home-page-fresh.png)
+
+### Reasoning Trace — Decomposed Sub-Queries
+![Reasoning Trace — Decomposed](assets/website-ss/reasoning-trace-decomposed.png)
+
+### Per-Subquery Retrieval & Generation
+![Reasoning Trace — Expanded](assets/website-ss/reasoning-trace-expanded-view-per-question.png)
+
+### Retrieved Passages Preview
+![Retrieved Passages](assets/website-ss/retrieved-passages-preview.png)
+
+### Citations, Tags & Follow-Ups
+![Citations & Follow-ups](assets/website-ss/citations-tags-and-preview-and-followups.png)
+
+### Evaluation Dashboard
+![Evaluation Tab](assets/website-ss/eval_tab.png)
+
+### LangSmith Trace — Single Query
+![LangSmith Trace](assets/langsmith/single_query.png)
+
+---
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup instructions, development workflow, coding standards, and how to add new pipeline nodes.
+
+---
+
+## Known Limitations
 
 | Area | Issue | Status |
-|---|---|---|
-| Context precision | 0.542 — off-topic chunks pass the reranker | Cross-encoder threshold tuning needed |
-| Faithfulness | 0.606 — synthesis LLM occasionally adds uncited claims | Stricter "cite or omit" prompt instruction |
-| Multi-hop comparison | Weakest category; under-decomposition on multi-entity queries | Reflection node planned (post-retrieve coverage check) |
+|------|-------|--------|
+| Context precision | 0.654 — off-topic chunks pass the reranker | Cross-encoder threshold tuning |
+| Faithfulness | 0.649 — synthesis LLM adds uncited claims | Stricter "cite or omit" prompt |
+| Multi-hop comparison | Weakest category; under-decomposition | Reflection + re-decomposition |
 | LLM cost tracking | `TokenTracker` wired but not called from LLM clients | Deferred |
-| Jina Reader blocking | IP-based blocks fall back to trafilatura | By design |
-
-**Planned improvements:**
-
-- [ ] Reflection node: post-retrieve coverage check → re-decompose if gaps found
-- [ ] BGE-reranker-v2-m3 upgrade (~5–8% precision improvement)
-- [ ] Post-hoc hallucination verification pass (claim → citation validation)
-- [ ] Streaming synthesis while sub-answers are still generating
-- [ ] LLM cost attribution via `TokenTracker`
-
----
-
-## Running Evaluations
-
-```bash
-# Smoke test (2 questions)
-python evals/run_eval.py --set smoke
-
-# Full benchmark (52 questions)
-python evals/run_eval.py --set full
-
-# Multi-turn scenarios
-python evals/run_eval.py --multiturn
-```
-
-Results are saved to `evals/results/{timestamp}/` with:
-- `summary.json` — aggregate metrics + category breakdown
-- `report.md` — human-readable score table
-- `failures.md` — worst-N questions with auto-classified probable cause
-- `eval.log` — raw pipeline + judge output
-
----
-
-## Credits
-
-Built with:
-- [FastAPI](https://fastapi.tiangolo.com/) — ASGI backend
-- [LangGraph](https://github.com/langchain-ai/langgraph) — pipeline orchestration
-- [sentence-transformers](https://www.sbert.net/) — MiniLM embeddings
-- [rank-bm25](https://github.com/dorianbrown/rank_bm25) — sparse retrieval
-- [DeepSeek](https://www.deepseek.com/) — primary LLM
-- [Tavily](https://tavily.com/) — URL discovery
-- [Supabase](https://supabase.com/) — PostgreSQL + pgvector
-- [LangSmith](https://smith.langchain.com/) — observability
 
 ---
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
+
+Built with [FastAPI](https://fastapi.tiangolo.com), [LangGraph](https://langchain-ai.github.io/langgraph/), [sentence-transformers](https://www.sbert.net/), [DeepSeek](https://www.deepseek.com/), [Tavily](https://tavily.com/), and [Supabase](https://supabase.com/).
