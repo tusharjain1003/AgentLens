@@ -44,19 +44,22 @@ from dotenv import load_dotenv
 # platform-injected env vars are honored.
 load_dotenv(Path(__file__).parent / ".env", override=True)  # noqa: E402
 
-from fastapi import FastAPI, HTTPException, Request  # noqa: E402
+from fastapi import Depends, FastAPI, HTTPException, Request  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.security import APIKeyHeader
 from langsmith import tracing_context
 from pydantic import BaseModel
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 import db.client as db
 import db.sessions as sessions
 from config import settings
 from pipeline.graph import run_pipeline
 from pipeline.generation_registry import (
-    GenerationRegistry,
     RunHandle,
     consume as registry_consume,
     get_registry,
@@ -116,6 +119,23 @@ def _preload_models() -> None:
 # ── App ────────────────────────────────────────────────────────────────────────
 
 app = FastAPI(title="WebLens", version="3.0.0", lifespan=lifespan)
+
+# ── Auth + Rate Limiting (Phase 3.11) ───────────────────────────────────────
+
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+async def _verify_api_key(request: Request) -> None:
+    """Optional API key check — enforced when settings.api_key is set (any env)."""
+    if settings.api_key:
+        key = request.headers.get("X-API-Key")
+        if not key or key != settings.api_key:
+            raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -291,7 +311,8 @@ async def _pipeline_stream(
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
 @app.post("/api/search")
-async def search_endpoint(req: SearchRequest, request: Request):
+@limiter.limit(f"{settings.rate_limit_per_minute}/minute")
+async def search_endpoint(req: SearchRequest, request: Request, _auth: None = Depends(_verify_api_key)):
     # Trace if either the env-driven setting is on OR the eval harness opts in via header.
     trace = settings.langsmith_tracing or request.headers.get("X-Langsmith-Trace", "").lower() == "true"
     cache_hdr = request.headers.get("X-Semantic-Cache", "").lower().strip()
@@ -558,6 +579,48 @@ async def health():
         "dev_mode": settings.environment != "production",
         "version": "3.0.0",
     }
+
+
+@app.post("/api/feedback")
+async def submit_feedback(payload: dict, request: Request):
+    """Record human feedback (thumbs up/down, citation report, or correction).
+
+    Body:
+      {
+        "session_id":    str,         # required
+        "message_id":    int,         # required — rag_session_messages.id
+        "rating":        int,         # required — -1 | 0 | 1
+        "correction":    str,         # optional free-text
+        "feedback_type": str,         # "overall" | "citation" (default "overall")
+        "citation_num":  int | null,  # specific [N] when feedback_type="citation"
+        "metadata":      dict | null  # extra context
+      }
+    """
+    session_id = (payload.get("session_id") or "").strip()
+    message_id = int(payload.get("message_id") or 0)
+    rating = int(payload.get("rating") or 0)
+
+    if not session_id or not message_id:
+        raise HTTPException(status_code=400, detail="session_id and message_id are required")
+    if rating not in (-1, 0, 1):
+        raise HTTPException(status_code=400, detail="rating must be -1, 0, or 1")
+
+    from db.feedback import save_feedback
+
+    fb_id = await save_feedback(
+        session_id=session_id,
+        message_id=message_id,
+        rating=rating,
+        correction=str(payload.get("correction") or "").strip()[:2000],
+        feedback_type=str(payload.get("feedback_type") or "overall"),
+        citation_num=payload.get("citation_num"),
+        metadata=payload.get("metadata") or {},
+    )
+    logger.info(
+        "[feedback] saved id=%d rating=%d for session=%s msg=%d",
+        fb_id, rating, session_id[:12], message_id,
+    )
+    return JSONResponse({"id": fb_id, "status": "ok"})
 
 
 @app.delete("/api/sessions/{session_id}")

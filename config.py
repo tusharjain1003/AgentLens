@@ -35,6 +35,13 @@ class Settings(BaseSettings):
     langsmith_tracing: bool = False
     langsmith_project: str = "weblens"
 
+    # Optional API key auth — when set, all /api/search requests must include
+    # X-API-Key header matching this value. Leave empty to disable (dev mode).
+    api_key: str = ""
+
+    # Rate limiting
+    rate_limit_per_minute: int = 10
+
     # Public mode (anon-session pattern from AlphaLens). When True:
     #   • GET /api/sessions returns [] (sidebar empty for end-users)
     #   • frontend uses sessionStorage for the session_id (cleared on tab close)
