@@ -70,6 +70,101 @@ from pipeline.tools.calculator import CalculatorError, evaluate_expression
 from pipeline import query_cache
 
 
+# ── Output validation (prompt-injection defense) ────────────────────────────
+# Post-generation safety checks:
+#   1. Every [N] citation must reference a valid source ID
+#   2. Answer must not contain instruction-like patterns that suggest the model
+#      is treating source content as instructions
+
+_INSTRUCTION_PATTERNS_RE = re.compile(
+    r"(?i)\b("
+    r"As an AI|"
+    r"I cannot (fulfill|comply|follow|obey)|"
+    r"I'm (sorry|unable|not able) to|"
+    r"I was (told|instructed|programmed) to|"
+    r"my (instructions|training|guidelines) (say|tell|require)|"
+    r"according to my (instructions|guidelines|principles)|"
+    r"I must decline|"
+    r"I will not (follow|obey|comply)"
+    r")\b"
+)
+
+
+def _validate_answer(answer: str, allowed_nums: set[int]) -> dict:
+    """Run output validation checks on a generated answer and repair it.
+
+    Args:
+        answer: The generated answer text.
+        allowed_nums: Set of citation numbers that the prompt actually provided
+                      (the snapshot, not the mutable global map).
+
+    Returns a dict with:
+      - valid: bool — True if all checks pass (answer is unchanged)
+      - warnings: list[str] — human-readable warning messages
+      - invalid_citations: list[int] — citation numbers NOT in the allowed set
+      - instruction_patterns: list[str] — matches of instruction-like patterns
+      - rejected: bool — True when the answer should not be used
+      - repaired_answer: str | None — corrected answer with invalid citations
+                         stripped, if any repairs were made
+    """
+    warnings: list[str] = []
+    invalid_citations_set: set[int] = set()
+    instruction_matches: list[str] = []
+
+    # Check 1: every [N] must be a citation number the prompt actually provided
+    nums = re.findall(r"\[(\d+)\]", answer)
+    for n_str in nums:
+        n = int(n_str)
+        if n not in allowed_nums:
+            invalid_citations_set.add(n)
+    if invalid_citations_set:
+        sorted_ics = sorted(invalid_citations_set)
+        warnings.append(
+            f"Answer references {len(sorted_ics)} invalid citation(s) "
+            f"([{','.join(str(x) for x in sorted_ics)}]) "
+            f"not in the prompt's {len(allowed_nums)} allowed sources."
+        )
+
+    # Check 2: flag instruction-like patterns
+    for match in _INSTRUCTION_PATTERNS_RE.finditer(answer):
+        instruction_matches.append(match.group(0).strip())
+    if instruction_matches:
+        deduped = sorted(set(instruction_matches))
+        warnings.append(
+            f"Answer contains {len(deduped)} instruction-like pattern(s): "
+            f"{deduped}"
+        )
+
+    result: dict = {
+        "valid": len(warnings) == 0,
+        "warnings": warnings,
+        "invalid_citations": sorted(invalid_citations_set),
+        "instruction_patterns": sorted(set(instruction_matches)),
+        "rejected": bool(instruction_matches),
+        "repaired_answer": None,
+    }
+
+    if instruction_matches:
+        result["repaired_answer"] = (
+            "The generated answer was blocked because it appeared to follow "
+            "instructions from retrieved source text. Please retry or inspect "
+            "the retrieved sources."
+        )
+        return result
+
+    # Repair: strip invalid [N] markers from the answer
+    if invalid_citations_set:
+        nums_to_strip = sorted(invalid_citations_set, reverse=True)
+        repaired = answer
+        for n in nums_to_strip:
+            repaired = re.sub(rf"\[{n}\]", "", repaired)
+        repaired = re.sub(r"  +", " ", repaired).strip()
+        if repaired != answer:
+            result["repaired_answer"] = repaired
+
+    return result
+
+
 # ── Traced wrappers — give each pipeline stage its own LangSmith run_type ─────
 # LangGraph's auto-instrumentation tags every node as `chain`. Wrapping the
 # inner work in @traceable lets LangSmith display proper icons:
@@ -531,8 +626,16 @@ async def node_extract_pages(state: GraphState, config: Any = None) -> dict:
     extraction = await _traced_extract_pages(search_results)
     pages = extraction.pages
     extract_failures = extraction.failures
+    injection_flags = extraction.injection_flags
     ms = int((time.perf_counter() - t0) * 1000)
     rt.record_stage("extract_ms", ms)
+
+    if injection_flags:
+        logger.warning("[extract] injection flags: %s", injection_flags)
+        await rt.emit("injection_warning", {
+            "type": "indirect_url_injection",
+            "details": injection_flags,
+        })
 
     if not pages:
         await rt.emit("error", {
@@ -1409,6 +1512,27 @@ async def node_retrieve_and_generate(state: GraphState, config: Any = None) -> d
                     utilization_ratio = (
                         round(citations_used / chunks_available, 3) if chunks_available else 0.0
                     )
+
+                    # Output validation — check [N] citations against the snapshot
+                    # the prompt actually saw, not the mutable global_citation_map
+                    # which another concurrent sub-query may have expanded.
+                    allowed_nums = set(citation_map_snapshot.values()) if citation_map_snapshot else set()
+                    validation = _validate_answer(cleaned_sub_text, allowed_nums)
+                    if not validation["valid"]:
+                        logger.warning(
+                            "[validate] sub-answer %d validation warnings: %s",
+                            index, validation["warnings"],
+                        )
+                        # Apply repair: strip invalid [N] citations
+                        if validation.get("repaired_answer"):
+                            cleaned_sub_text = validation["repaired_answer"]
+                            used_nums = set(int(m) for m in re.findall(r"\[(\d+)\]", cleaned_sub_text))
+                            citations_used = len(used_nums)
+                            utilization_ratio = (
+                                round(citations_used / chunks_available, 3) if chunks_available else 0.0
+                            )
+                        run.add_outputs({"validation_warnings": validation["warnings"]})
+
                     run.add_outputs({
                         "answer": cleaned_sub_text,
                         "chunks_available": chunks_available,
@@ -1424,6 +1548,7 @@ async def node_retrieve_and_generate(state: GraphState, config: Any = None) -> d
                         "citations_used": citations_used,
                         "utilization_ratio": utilization_ratio,
                         "hyperlinks_stripped": stripped_links,
+                        "validation": validation,
                         "_clean_text": cleaned_sub_text,
                     }))
                 except asyncio.CancelledError:
@@ -1549,6 +1674,20 @@ async def node_retrieve_and_generate(state: GraphState, config: Any = None) -> d
 
     all_allowed_urls = {c["url"] for c in _all_citations}
     final_text, _final_stripped = strip_unknown_links(final_text, all_allowed_urls)
+
+    # Output validation — final answer (check against actual citation nums)
+    final_allowed = {c["num"] for c in _all_citations}
+    final_validation = _validate_answer(final_text, final_allowed)
+    if not final_validation["valid"]:
+        logger.warning(
+            "[validate] final answer validation warnings: %s",
+            final_validation["warnings"],
+        )
+        # Apply repair: strip invalid [N] citations
+        if final_validation.get("repaired_answer"):
+            final_text = final_validation["repaired_answer"]
+        rt.latency_breakdown["validation_warnings"] = final_validation["warnings"]
+        await rt.emit("validation_warning", final_validation)
 
     # Citation reconciliation — drop unreferenced
     referenced_nums: set = set()
@@ -1733,17 +1872,9 @@ async def node_emit_done(state: GraphState, config: Any = None) -> dict:
         "verification": state.get("verification") or {},
     }
 
-    await rt.emit("done", {
-        "session_id":        rt.session_id,
-        "citations":         state.get("citations") or [],
-        "total_latency_ms":  total_ms,
-        "latency_breakdown": latency_breakdown,
-        "followups":         followups,
-        "mode":              state.get("mode") or "search",
-        "verification":      state.get("verification") or {},
-    })
-
-    # Persist (fire-and-forget) — preserves existing session history behavior.
+    # Persist synchronously before emitting done so the message_id is
+    # available in the event payload (needed by the feedback loop).
+    message_id: Optional[int] = None
     if rt.session_id and not state.get("error"):
         latency_with_extras = {
             **latency_breakdown,
@@ -1757,7 +1888,7 @@ async def node_emit_done(state: GraphState, config: Any = None) -> dict:
             "route_confidence":   state.get("confidence"),
             "rewrite_confidence": state.get("rewrite_confidence"),
         }
-        asyncio.create_task(sessions.save_message(
+        message_id = await sessions.save_message(
             session_id=rt.session_id,
             question=state["query"],
             answer=state.get("final_answer") or "",
@@ -1768,7 +1899,7 @@ async def node_emit_done(state: GraphState, config: Any = None) -> dict:
             total_latency_ms=total_ms,
             sub_queries=state.get("sub_queries") or [state["query"]],
             traces=state.get("traces") or [],
-        ))
+        )
         # Phase 7 — fire-and-forget memory-state update: persist the topic
         # anchor AND roll the eviction window through the incremental summary.
         # This runs AFTER answer streaming completes, so it adds zero latency
@@ -1780,6 +1911,17 @@ async def node_emit_done(state: GraphState, config: Any = None) -> dict:
             current_question=state["query"],
             current_answer=state.get("final_answer") or "",
         ))
+
+    await rt.emit("done", {
+        "session_id":        rt.session_id,
+        "message_id":        message_id,
+        "citations":         state.get("citations") or [],
+        "total_latency_ms":  total_ms,
+        "latency_breakdown": latency_breakdown,
+        "followups":         followups,
+        "mode":              state.get("mode") or "search",
+        "verification":      state.get("verification") or {},
+    })
 
     await rt.signal_done()
     return {"followups": followups, "latency_breakdown": latency_breakdown}
