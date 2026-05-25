@@ -16,7 +16,7 @@ import asyncio
 import logging
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional
 
 import httpx
@@ -52,19 +52,57 @@ _BOILERPLATE_LINE_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Zero-width / invisible unicode chars that survive NFKC normalization
-_INVISIBLE_RE = re.compile(r"[​‌‍⁠﻿]")
+# Zero-width / invisible / RTL-override unicode chars that survive NFKC normalization
+# Includes: zero-width space, zero-width non-joiner, zero-width joiner,
+#           word joiner, BOM, left-to-right override, right-to-left override,
+#           pop directional format, left-to-right isolate, right-to-left isolate,
+#           first strong isolate, activate/deactivate symmetric swapping,
+#           activate/deactivate Arabic form shaping.
+_INVISIBLE_RE = re.compile(
+    r"["
+    r"\u200B\u200C\u200D\u2060\uFEFF"    # zero-width / invisible
+    r"\u202A\u202B\u202D\u202E\u2066\u2067\u2068\u2069"  # bidi overrides / isolates
+    r"\u200F\u206A\u206B\u206C\u206D\u206E\u206F"  # pop-directional / inhibit / activate
+    r"]"
+)
+# Homoglyph confusables: map common lookalike chars to ASCII
+_HOMOGLYPH_MAP = str.maketrans({
+    "𝐚": "a", "𝐛": "b", "𝐜": "c", "𝐝": "d", "𝐞": "e",
+    "𝐟": "f", "𝐠": "g", "𝐡": "h", "𝐢": "i", "𝐣": "j",
+    "𝐤": "k", "𝐥": "l", "𝐦": "m", "𝐧": "n", "𝐨": "o",
+    "𝐩": "p", "𝐪": "q", "𝐫": "r", "𝐬": "s", "𝐭": "t",
+    "𝐮": "u", "𝐯": "v", "𝐰": "w", "𝐱": "x", "𝐲": "y",
+    "𝐳": "z",
+    "𝖺": "a", "𝖻": "b", "𝖼": "c", "𝖽": "d", "𝖾": "e",
+    "𝖿": "f", "𝗀": "g", "𝗁": "h", "𝗂": "i", "𝗃": "j",
+    "𝗄": "k", "𝗅": "l", "𝗆": "m", "𝗇": "n", "𝗈": "o",
+    "𝗉": "p", "𝗊": "q", "𝗋": "r", "𝗌": "s", "𝗍": "t",
+    "𝗎": "u", "𝗏": "v", "𝗐": "w", "𝗑": "x", "𝗒": "y",
+    "𝗓": "z",
+    "𝙰": "A", "𝙱": "B", "𝙲": "C", "𝙳": "D", "𝙴": "E",
+    "𝙵": "F", "𝙶": "G", "𝙷": "H", "𝙸": "I", "𝙹": "J",
+    "𝙺": "K", "𝙻": "L", "𝙼": "M", "𝙽": "N", "𝙾": "O",
+    "𝙿": "P", "𝚀": "Q", "𝚁": "R", "𝚂": "S", "𝚃": "T",
+    "𝚄": "U", "𝚅": "V", "𝚆": "W", "𝚇": "X", "𝚈": "Y",
+    "𝚉": "Z",
+    "а": "a", "е": "e", "о": "o", "р": "p", "с": "c",
+    "х": "x", "і": "i", "ј": "j",
+})
 # Excess blank lines — collapse 3+ to 2
 _BLANK_LINES_RE = re.compile(r"\n{3,}")
+# Markdown link pattern — for indirect injection detection
+_INJECTION_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^)\s]+)\)")
 
 
 def _normalize_unicode(text: str) -> str:
     """NFKC normalization (curly quotes, full-width chars, ligatures → ASCII)
-    plus zero-width strip. Deterministic, <1ms per page."""
+    plus zero-width/bidi-override strip + homoglyph reduction.
+    Deterministic, <1ms per page."""
     if not text:
         return text
     text = unicodedata.normalize("NFKC", text)
     text = _INVISIBLE_RE.sub("", text)
+    text = text.translate(_HOMOGLYPH_MAP)
     return text
 
 
@@ -99,9 +137,11 @@ class ExtractedPage:
 
 @dataclass
 class ExtractionResult:
-    """Return value of extract_pages — successful pages plus per-URL failure reasons."""
+    """Return value of extract_pages — successful pages plus per-URL failure reasons plus
+    any suspicious links detected for prompt-injection protection."""
     pages: List[ExtractedPage]
     failures: List[dict]  # [{url, reason}]  reason ∈ {timeout, http_error, too_short, parse_failed}
+    injection_flags: List[dict] = field(default_factory=list)  # [{url, text}] suspicious external links found in pages
 
 
 # ── DB cache helpers ───────────────────────────────────────────────────────────
@@ -262,6 +302,19 @@ async def _extract_via_trafilatura(
 
 # ── Main public API ────────────────────────────────────────────────────────────
 
+def _check_indirect_injection(markdown: str, search_urls: set[str]) -> list[dict]:
+    """Check if extracted markdown contains URLs not in the original search results.
+    This detects indirect prompt injection where a malicious page includes
+    `http://` links that try to control the assistant."""
+    found_links = _INJECTION_LINK_RE.findall(markdown)
+    suspicious = []
+    for text, url in found_links:
+        norm_url = url.rstrip("/").lower()
+        if not any(search_url.rstrip("/").lower() == norm_url for search_url in search_urls):
+            suspicious.append({"url": url, "text": text[:80]})
+    return suspicious[:10]
+
+
 async def extract_pages(results: List[SearchResult]) -> ExtractionResult:
     """
     Extract full content for all search result URLs.
@@ -308,8 +361,20 @@ async def extract_pages(results: List[SearchResult]) -> ExtractionResult:
     # Merge, preserving original URL order
     all_pages = {**cached, **{p.url: p for p in fresh}}
     ordered = [all_pages[u] for u in urls if u in all_pages]
+
+    # 4. Indirect injection detection — flag extracted markdown links not in original search URLs
+    original_urls = set(urls)
+    all_flags: list[dict] = []
+    for page in ordered:
+        flags = _check_indirect_injection(page.markdown, original_urls)
+        if flags:
+            logger.warning("[extract] %d suspicious link(s) in %s", len(flags), page.url)
+            all_flags.append({"page_url": page.url, "suspicious_links": flags})
+    if all_flags:
+        logger.warning("[extract] Indirect injection flags: %d pages with external links", len(all_flags))
+
     logger.info("[extract] %d pages ready, %d failures", len(ordered), len(failures))
-    return ExtractionResult(pages=ordered, failures=failures)
+    return ExtractionResult(pages=ordered, failures=failures, injection_flags=all_flags)
 
 
 async def _fetch_one(
